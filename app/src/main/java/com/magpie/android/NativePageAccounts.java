@@ -46,6 +46,8 @@ final class NativePageAccounts extends NativePage {
 
     /** 签到的 /api/state 快照（开关+今日状态），签到动作后刷新。 */
     private volatile org.json.JSONObject checkinState;
+    /** 账号级「今日缓存命中率」映射：key = provider + "|" + account，value = 0-100。 */
+    private volatile java.util.Map<String, Double> cacheHitMap = java.util.Collections.emptyMap();
     /** 正在签到中的供应商（防止重复点）。 */
     private final java.util.Set<String> checkinBusy = new java.util.HashSet<>();
 
@@ -91,6 +93,42 @@ final class NativePageAccounts extends NativePage {
 
     @Override
     void load() {
+        // 并行拉一次「今日 usage」的账号级缓存命中率（失败静默跳过，不影响额度展示）
+        final java.util.concurrent.atomic.AtomicReference<java.util.Map<String, Double>> hitRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        Thread hitThread = new Thread(() -> {
+            try {
+                MagpieApi.Result u = MagpieApi.get(host, "/api/usage?period=today", 6000, 15000);
+                if (u.ok() && u.json() != null) {
+                    org.json.JSONArray accs = NativeData.arr(u.json(), "accounts");
+                    java.util.Map<String, Double> m = new java.util.HashMap<>();
+                    for (int i = 0; i < accs.length(); i++) {
+                        org.json.JSONObject it = NativeData.at(accs, i);
+                        if (it == null) {
+                            continue;
+                        }
+                        String prov = NativeData.str(it, "provider", "");
+                        String acc = NativeData.str(it, "account", "");
+                        if (acc.isEmpty()) {
+                            acc = NativeData.str(it, "user", "");
+                        }
+                        if (prov.isEmpty() && acc.isEmpty()) {
+                            continue;
+                        }
+                        double h = CacheHit.pct(it);
+                        if (h >= 0) {
+                            m.put(prov + "|" + acc, h);
+                        }
+                    }
+                    hitRef.set(m);
+                }
+            } catch (Throwable ignored) {
+                // 静默：缓存拿不到就只是不显示
+            }
+        }, "magpie-usage-hit");
+        hitThread.setDaemon(true);
+        hitThread.start();
+
         MagpieApi.Result quota = MagpieApi.quotas(host);
         if (!quota.ok()) {
             host.post(() -> failed(quota.why()));
@@ -163,6 +201,14 @@ final class NativePageAccounts extends NativePage {
         if (cs.ok() && cs.json() != null) {
             checkinState = cs.json();
         }
+
+        // 等并行 usage 命中率最多 3s（已和额度/供应商请求重叠，基本不额外拖慢）
+        try {
+            hitThread.join(3000);
+        } catch (InterruptedException ignored) {
+        }
+        java.util.Map<String, Double> hm = hitRef.get();
+        cacheHitMap = hm == null ? java.util.Collections.<String, Double>emptyMap() : hm;
 
         host.post(() -> {
             // 开关状态先落地，accountRow 建卡片时要用
@@ -1114,7 +1160,36 @@ final class NativePageAccounts extends NativePage {
             String plan = Zh.of(NativeData.str(q, "plan", ""));
             sb.append(plan.isEmpty() ? "点开看详情" : plan);
         }
+        // 额度/已用行末尾追加今日缓存命中率（有数据才显示，绝不显示 0% 误导）
+        double cacheHit = cacheHitFor(q);
+        if (cacheHit >= 0) {
+            if (sb.length() > 0) {
+                sb.append(" · ");
+            }
+            sb.append("缓存 ").append(NativeData.percent(cacheHit));
+        }
         return sb.toString();
+    }
+
+    /** 按 provider+账号 查今日缓存命中率；没映射返回 -1（调用方不显示）。 */
+    private double cacheHitFor(JSONObject q) {
+        java.util.Map<String, Double> m = cacheHitMap;
+        if (m == null || m.isEmpty()) {
+            return -1;
+        }
+        String prov = NativeData.str(q, "provider", "");
+        String[] cands = {NativeData.str(q, "user", ""), NativeData.str(q, "alias", ""),
+                NativeData.str(q, "seat", ""), NativeData.str(q, "name", "")};
+        for (String c : cands) {
+            if (c == null || c.isEmpty()) {
+                continue;
+            }
+            Double v = m.get(prov + "|" + c);
+            if (v != null) {
+                return v;
+            }
+        }
+        return -1;
     }
 
     /** 已用/总额：取第一个给 amount/limit 的额度窗口，拼 "x / y 单位"。 */

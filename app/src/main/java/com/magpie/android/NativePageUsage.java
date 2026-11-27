@@ -440,6 +440,16 @@ final class NativePageUsage extends NativePage {
         name.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         head.addView(name, ui.weight(1));
 
+        // 缓存命中率：行自带 in/out/cache_read/cache_write；无数据/分母<=0 不显示
+        double cacheHit = CacheHit.pct(r);
+        if (cacheHit >= 0) {
+            TextView ch = ui.text("缓存 " + NativeData.percent(cacheHit), 10,
+                    M3.ON_SURFACE_VARIANT, false);
+            LinearLayout.LayoutParams chlp = ui.wrap();
+            chlp.leftMargin = ui.dp(6);
+            head.addView(ch, chlp);
+        }
+
         if (failed) {
             head.addView(ui.pill(status > 0 ? String.valueOf(status) : "失败",
                     M3.ERROR_CONTAINER, M3.ON_ERROR_CONTAINER));

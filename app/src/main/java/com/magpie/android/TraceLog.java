@@ -380,6 +380,18 @@ final class TraceLog {
         m.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         line.addView(m, ui.weight(1));
 
+        // 缓存命中率：取 usage(0) 的 in/out/cache_read；无数据/分母<=0 不显示
+        org.json.JSONArray usage = NativeData.arr(r, "usage");
+        org.json.JSONObject u0 = usage.length() > 0 ? usage.optJSONObject(0) : null;
+        double cacheHit = CacheHit.pct(u0);
+        if (cacheHit >= 0) {
+            TextView ch = ui.text("缓存 " + NativeData.percent(cacheHit), 10,
+                    M3.ON_SURFACE_VARIANT, false);
+            LinearLayout.LayoutParams chlp = ui.wrap();
+            chlp.leftMargin = ui.dp(6);
+            line.addView(ch, chlp);
+        }
+
         int status = NativeData.num(r, "status");
         long ms = (long) NativeData.dec(r, "ms");
         if (status >= 400) {

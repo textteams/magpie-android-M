@@ -868,7 +868,7 @@ public class NativeHome extends Activity {
                         "设了无限制仍被系统掐断？加个悬浮球通常就不断了（图标/大小可调）",
                         "网关最后写下的三百行输出", "把 …:3425/v1 复制到剪贴板",
                         "诊断后台被冻结的原因，可一键设无限制（需 root）",
-                        "给 Antigravity 供应商装 CLI（下载约65MB，解压200MB）；装好后去供应商页点重试登录"},
+                        "给 Antigravity 供应商装 CLI（下载约65MB，约 200MB 磁盘占用）；装好后去供应商页点重试登录"},
                 {"从手机存储选文件夹，拷进沙箱并交给 magpie",
                         "浏览器里登录完，把地址栏整条 URL 贴进来",
                         "浏览、导入、删除、复制 magpie HOME 目录里的文件",
@@ -1116,7 +1116,7 @@ public class NativeHome extends Activity {
         AlertDialog dlg = new AlertDialog.Builder(this)
                 .setTitle("安装 Antigravity CLI")
                 .setMessage("给 Antigravity 供应商装 CLI。将从官方源下载 android arm64 包：\n"
-                        + "下载约 65MB，解压后约 200MB。\n"
+                        + "下载约 65MB，约 200MB 磁盘占用。\n"
                         + "装好后去供应商页点“重试”即可登录。\n\n现在开始？")
                 .setPositiveButton("开始安装", (d, w) -> runAntigravityInstall())
                 .setNegativeButton(android.R.string.cancel, null)

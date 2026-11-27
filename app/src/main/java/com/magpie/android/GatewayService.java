@@ -1030,6 +1030,19 @@ public class GatewayService extends Service {
             + "  throw new Error(\"等待粘贴 Marvis 授权回调超时（10 分钟）。请重新点一次登录。\")\n"
             + "}\n";
 
+    // ---- Antigravity 桥接插件：install.mjs 的 agyPlatform() 少了 android 分支 ----
+    //     Google 官方其实有 android_arm64 清单；插件 platform 判断到 android 直接 return null →
+    //     误报 "Antigravity CLI has no build for android arm64"。补一条 android 分支即可
+    //     （插件随后自己会去读 manifests/android_arm64.json 下载安装）。
+    private static final String AGY_PATCH_ID = "opencode-antigravity-bridge";
+    private static final String AGY_ANCHOR =
+            "  if (platform === \"linux\") return `linux_${cpu}${musl ? \"_musl\" : \"\"}`";
+    private static final String AGY_REPLACEMENT =
+            "  if (platform === \"android\") return `android_${cpu}`\n"
+                    + "  if (platform === \"linux\") return `linux_${cpu}${musl ? \"_musl\" : \"\"}`";
+    /** 幂等标记：已含这段就说明补过。 */
+    private static final String AGY_MARK = "android_${cpu}";
+
     /** 已知需要 Android 适配的插件。加新插件就往这里加一条。 */
     private static final Patch[] PATCHES = {
             new Patch("magpie-marvis", MARVIS_FILE, MARVIS_MARK, MARVIS_HELPER_MARK,
@@ -1050,6 +1063,8 @@ public class GatewayService extends Service {
         for (Patch p : PATCHES) {
             applyPatch(ctx, p);
         }
+        // Antigravity 桥接插件的 install.mjs 装在版本化目录里，路径不固定，单独扫描补。
+        patchAntigravityPlugin(ctx);
     }
 
     private static void applyPatch(Context ctx, Patch p) {
@@ -1096,6 +1111,90 @@ public class GatewayService extends Service {
         } catch (IOException e) {
             patchNote = p.id + " 的兼容补丁写不进去";
             appendLog("插件补丁写入失败：" + p.id + " " + e.getMessage());
+        }
+    }
+
+    /**
+     * 补 Antigravity 桥接插件：install.mjs 的 agyPlatform() 缺 android 分支。
+     *
+     * <p>插件装在版本化目录（含 @GH@…install-cache），落点不固定，所以遍历 data/plugins 下
+     * 所有名为 install.mjs、且含 agyPlatform 的文件做锚点替换；找不到锚点就跳过记日志，
+     * 绝不整文件覆盖。已含 {@link #AGY_MARK} 视为已补，幂等跳过。每次 boot 都会跑，
+     * 插件更新后被覆盖会自动补回。
+     */
+    private static void patchAntigravityPlugin(Context ctx) {
+        File plugins = new File(dataDir(ctx), "plugins");
+        if (!plugins.isDirectory()) {
+            return;
+        }
+        java.util.List<File> hits = new java.util.ArrayList<>();
+        collectInstallMjs(plugins, hits, 0, new int[]{0});
+        for (File f : hits) {
+            String src;
+            try {
+                src = readText(f);
+            } catch (IOException e) {
+                continue;
+            }
+            if (src == null || !src.contains("agyPlatform")) {
+                continue;
+            }
+            if (src.contains(AGY_MARK)) {
+                continue; // 已补过
+            }
+            if (!src.contains(AGY_ANCHOR)) {
+                appendLog("插件补丁跳过：" + AGY_PATCH_ID + " 锚点找不到（install.mjs 结构变了）");
+                continue;
+            }
+            String out = src.replace(AGY_ANCHOR, AGY_REPLACEMENT);
+            if (writePatched(f, src, out)) {
+                appendLog("已补 antigravity 插件 android 平台支持：" + f.getAbsolutePath());
+            }
+        }
+    }
+
+    /** 递归收集 data/plugins 下名为 install.mjs 的文件（深度/数量/遍历目录数设上限，避免拖慢启动）。 */
+    private static void collectInstallMjs(File dir, java.util.List<File> out, int depth, int[] dirs) {
+        if (dir == null || depth > 12 || out.size() > 200 || dirs[0] > 3000) {
+            return;
+        }
+        dirs[0]++;
+        File[] kids = dir.listFiles();
+        if (kids == null) {
+            return;
+        }
+        for (File k : kids) {
+            if (k.isDirectory()) {
+                if (".git".equals(k.getName())) {
+                    continue;
+                }
+                collectInstallMjs(k, out, depth + 1, dirs);
+            } else if ("install.mjs".equals(k.getName())) {
+                out.add(k);
+            }
+        }
+    }
+
+    /** 原子写补丁：备份 .bak → 写 .magpie-tmp → rename 覆盖。成功返回 true。 */
+    private static boolean writePatched(File f, String src, String out) {
+        try {
+            File parent = f.getParentFile();
+            File bak = new File(parent, f.getName() + ".bak");
+            try (FileOutputStream bo = new FileOutputStream(bak)) {
+                bo.write(src.getBytes(StandardCharsets.UTF_8));
+            }
+            File tmp = new File(parent, f.getName() + ".magpie-tmp");
+            try (FileOutputStream o = new FileOutputStream(tmp)) {
+                o.write(out.getBytes(StandardCharsets.UTF_8));
+            }
+            if (!tmp.renameTo(f)) {
+                tmp.delete();
+                return false;
+            }
+            return true;
+        } catch (IOException e) {
+            appendLog("插件补丁写入失败：" + AGY_PATCH_ID + " " + e.getMessage());
+            return false;
         }
     }
 

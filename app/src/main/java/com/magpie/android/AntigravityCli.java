@@ -63,35 +63,21 @@ public final class AntigravityCli {
         new Thread(() -> doInstall(app, cb), "antigravity-install").start();
     }
 
-    /** 已装 CLI 的版本（跑 {@code antigravity --version} 取第一行）；没装或读不到返回 ""。 */
+    /** 已装 CLI 的版本：优先读新位置 {@code agy.version}；没有则跑 {@code agy --version} 兜底。 */
     static String installedVersion(Context ctx) {
-        File bin = new File(GatewayService.rootDir(ctx), "antigravity");
-        if (!bin.isFile()) {
-            return "";
-        }
-        Process p = null;
-        try {
-            ProcessBuilder pb = new ProcessBuilder(bin.getAbsolutePath(), "--version");
-            pb.redirectErrorStream(true);
-            p = pb.start();
+        File dir = new File(GatewayService.homeDir(ctx), ".local/share/magpie-agy-cli");
+        File verFile = new File(dir, "agy.version");
+        if (verFile.isFile()) {
             try {
-                p.waitFor(3, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            if (p.isAlive()) {
-                p.destroy();
-            }
-            String out = readAll(p.getInputStream()).trim();
-            int nl = out.indexOf('\n');
-            return (nl > 0 ? out.substring(0, nl) : out).trim();
-        } catch (Exception e) {
-            return "";
-        } finally {
-            if (p != null) {
-                p.destroy();
+                String v = readAll(new FileInputStream(verFile)).trim();
+                if (!v.isEmpty()) {
+                    int nl = v.indexOf('\n');
+                    return (nl > 0 ? v.substring(0, nl) : v).trim();
+                }
+            } catch (Exception ignored) {
             }
         }
+        return readBinaryVersion(new File(dir, "agy"));
     }
 
     // ------------------------------------------------------------------
@@ -108,32 +94,50 @@ public final class AntigravityCli {
     private static void doInstall(Context ctx, Progress cb) {
         File tgz = null;
         try {
-            // a) 清单
+            // a) 清单（复用分支也需要 version 兜底）
             String[] m = fetchManifest();
             final String version = m[0];
             String url = m[1];
             String sha512 = m[2];
+
+            // 目标目录 = 插件真正认的位置：$HOME/.local/share/magpie-agy-cli
+            // （$HOME = GatewayService.homeDir(ctx) = filesDir/home；没有设 XDG_DATA_HOME）
+            // 目录必须由 App 进程自己创建，权限/SELinux label 才正确。
+            File home = GatewayService.homeDir(ctx);
+            File dir = new File(home, ".local/share/magpie-agy-cli");
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                throw new Fail("写盘失败：无法创建目录 " + dir);
+            }
+            File bin = new File(dir, "agy");
+            File verFile = new File(dir, "agy.version");
+
+            // b) 优先复用旧位置已有的 antigravity（省一次下载/解压）
+            File old = new File(GatewayService.rootDir(ctx), "antigravity");
+            if (old.isFile() && old.length() > (1L << 20) && looksLikeElf(old)) {
+                reuseOld(old, bin); // 硬链接或流式复制 + chmod
+                String v = firstNonEmpty(readBinaryVersion(bin), version);
+                writeVersion(verFile, v);
+                GatewayService.appendLog("已从已有 antigravity 复用安装：" + bin.getAbsolutePath());
+                final long size = bin.length();
+                final String path = bin.getAbsolutePath();
+                post(() -> cb.onDone(v, path, size));
+                return;
+            }
+
             if (url.isEmpty()) {
                 throw new Fail("清单里没有下载地址");
             }
 
-            // b) 下载到 cacheDir
+            // c) 下载到 cacheDir
             File cache = ctx.getCacheDir();
             if (cache == null) {
                 throw new Fail("写盘失败：拿不到缓存目录");
             }
             tgz = new File(cache, "antigravity.tar.gz");
-
-            // c) 边下边算 SHA-512
             downloadAndVerify(url, tgz, sha512, cb);
 
-            // d) 解出 antigravity
-            File root = GatewayService.rootDir(ctx);
-            if (!root.isDirectory() && !root.mkdirs()) {
-                throw new Fail("写盘失败：无法创建目录 " + root);
-            }
-            File dest = new File(root, "antigravity");
-            File tmpBin = new File(root, "antigravity.tmp");
+            // d) 解压到 dir/agy.tmp
+            File tmpBin = new File(dir, "agy.tmp");
             try {
                 extractBinary(tgz, tmpBin);
             } catch (IOException e) {
@@ -141,24 +145,27 @@ public final class AntigravityCli {
                 throw new Fail("解压失败：" + safe(e));
             }
 
-            // e) chmod 755 + rename 原子替换
+            // e) chmod 755 + rename 原子替换（目标是 app 自己创建的目录，权限天然正确）
             tmpBin.setExecutable(true, false);
             chmod755(tmpBin);
-            if (dest.exists() && !dest.delete()) {
+            if (bin.exists() && !bin.delete()) {
                 tmpBin.delete();
                 throw new Fail("写盘失败：旧文件删不掉");
             }
-            if (!tmpBin.renameTo(dest)) {
+            if (!tmpBin.renameTo(bin)) {
                 tmpBin.delete();
                 throw new Fail("写盘失败：临时文件改名失败");
             }
-            dest.setExecutable(true, false);
-            chmod755(dest);
+            bin.setExecutable(true, false);
+            chmod755(bin);
 
-            // f) 成功
-            final long size = dest.length();
-            final String path = dest.getAbsolutePath();
-            post(() -> cb.onDone(version, path, size));
+            // f) 写 agy.version（版本号 + "\n"），插件据此判断已安装
+            String v = firstNonEmpty(version, readBinaryVersion(bin));
+            writeVersion(verFile, v);
+
+            final long size = bin.length();
+            final String path = bin.getAbsolutePath();
+            post(() -> cb.onDone(v, path, size));
         } catch (Fail f) {
             Log.w(TAG, "安装失败: " + f.getMessage());
             final String why = f.getMessage();
@@ -444,6 +451,107 @@ public final class AntigravityCli {
             }
             remaining -= got;
         }
+    }
+
+    /** 简单 ELF 头判定（.ELF magic），用于判断旧文件是不是可用的 Bionic 可执行。 */
+    private static boolean looksLikeElf(File f) {
+        if (f == null || !f.isFile() || f.length() < 4) {
+            return false;
+        }
+        try (InputStream in = new FileInputStream(f)) {
+            byte[] b = new byte[4];
+            return in.read(b) == 4
+                    && (b[0] & 0xff) == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F';
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /** 把旧位置的 antigravity 复用为新位置的 agy：优先硬链接（同分区瞬时、不占额外空间），失败再流式复制；最后 chmod 755。 */
+    private static void reuseOld(File old, File bin) throws IOException {
+        if (bin.exists() && !bin.delete()) {
+            throw new IOException("旧文件删不掉：" + bin);
+        }
+        boolean linked = false;
+        try {
+            // API 21+；同分区才能成，失败就复制
+            android.system.Os.link(old.getAbsolutePath(), bin.getAbsolutePath());
+            linked = bin.isFile();
+        } catch (Throwable t) {
+            linked = false;
+        }
+        if (!linked) {
+            copyFile(old, bin);
+        }
+        bin.setExecutable(true, false);
+        chmod755(bin);
+    }
+
+    /** 流式复制文件（不依赖 Files.copy）。 */
+    private static void copyFile(File src, File dst) throws IOException {
+        try (InputStream in = new FileInputStream(src);
+             OutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                out.write(buf, 0, n);
+            }
+            out.flush();
+        }
+    }
+
+    /** 跑 {@code agy --version} 取第一行；读不到返回 ""。 */
+    private static String readBinaryVersion(File bin) {
+        if (bin == null || !bin.isFile()) {
+            return "";
+        }
+        Process p = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(bin.getAbsolutePath(), "--version");
+            pb.redirectErrorStream(true);
+            p = pb.start();
+            try {
+                p.waitFor(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            if (p.isAlive()) {
+                p.destroy();
+            }
+            String out = readAll(p.getInputStream()).trim();
+            int nl = out.indexOf('\n');
+            return (nl > 0 ? out.substring(0, nl) : out).trim();
+        } catch (Exception e) {
+            return "";
+        } finally {
+            if (p != null) {
+                p.destroy();
+            }
+        }
+    }
+
+    /** 原子写 agy.version：内容 = 版本号 + "\n"（插件 installedVersion 读它并 trim 比较）。 */
+    private static void writeVersion(File verFile, String v) throws IOException {
+        File tmp = new File(verFile.getParentFile(), verFile.getName() + ".tmp");
+        try (FileOutputStream o = new FileOutputStream(tmp)) {
+            o.write((v == null ? "" : v).getBytes(StandardCharsets.UTF_8));
+            o.write('\n');
+        }
+        if (verFile.exists() && !verFile.delete()) {
+            tmp.delete();
+            throw new IOException("版本文件删不掉");
+        }
+        if (!tmp.renameTo(verFile)) {
+            tmp.delete();
+            throw new IOException("版本文件改名失败");
+        }
+    }
+
+    private static String firstNonEmpty(String a, String b) {
+        if (a != null && !a.trim().isEmpty()) {
+            return a.trim();
+        }
+        return b == null ? "" : b.trim();
     }
 
     private static void chmod755(File f) {

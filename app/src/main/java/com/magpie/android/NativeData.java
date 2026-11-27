@@ -187,6 +187,25 @@ final class NativeData {
         return Math.max(0, Math.min(100, read * 100.0 / denom));
     }
 
+    /** 缓存命中率（0-100）：对「自身就含 in/input、cache_read、cache_write 的对象」直接算。
+     *  单条请求用 in；聚合项用 input；两者都没有时返回 0。（用 lng，累计量可能超 int。） */
+    static double cacheHit(JSONObject o) {
+        if (o == null) {
+            return 0;
+        }
+        long read = lng(o, "cache_read");
+        long write = lng(o, "cache_write");
+        long input = lng(o, "input");
+        if (input == 0) {
+            input = lng(o, "in");
+        }
+        long denom = read + write + input;
+        if (denom <= 0) {
+            return 0;
+        }
+        return Math.max(0, Math.min(100, read * 100.0 / denom));
+    }
+
     /** 字节：438 MB / 66 MB / 1.5 GB（1000 进制，跟网页一致）。 */
     static String bytes(long n) {
         String[] u = {"B", "KB", "MB", "GB", "TB"};
