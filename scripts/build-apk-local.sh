@@ -13,6 +13,12 @@
 #   - Android SDK：build-tools 的 lib/d8.jar、lib/apksigner.jar，platforms 里的 android.jar
 #   - aarch64 的 aapt2 / zipalign：仓库自带 scripts/tools/aarch64/，
 #     x86_64 机器上自动改用 $SDK/build-tools/<ver>/ 里那份
+#
+# versionCode 规则（重要，别再搞错）：versionCode = major*10000 + minor*1000 + patch。
+#   1.8.36 -> 18036；1.8.68 -> 18068。
+#   历史：1.8.4=184 … 1.8.36=18036 用的是旧的 1xx 规则；1.8.36 起实际用 18xxx 规则。
+#   不显式传 VERSION_CODE 时，本脚本按 VERSION_NAME 自动推导；patch>999 直接报错。
+#   不要修改已发布历史 tag 的 versionCode。
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,10 +29,31 @@ SDK="${SDK%/}"
 BT_VER="${BUILD_TOOLS_VERSION:-}"
 OUT_DIR="${OUT_DIR:-$ROOT/dist}"
 VERSION_NAME="${VERSION_NAME:-1.0}"
-VERSION_CODE="${VERSION_CODE:-1}"
 APP_ID="com.magpie.android"
 
 die() { echo "错误：$*" >&2; exit 1; }
+
+# --- versionCode 推导（重要）---------------------------------------
+# 实测真实规则：1.8.36 的 APK versionCode = 18036 = major*10000 + minor*1000 + patch。
+#   历史：1.8.4=184 … 1.8.36=18036（旧的 1xx 规则已废弃）；1.8.36 起实际用 18xxx 规则。
+#   不要修改已发布历史 tag 的 versionCode。
+# 未显式传 VERSION_CODE 时，一律由 VERSION_NAME 推导；patch>999 直接报错（会与 minor 进位号码冲突）。
+if [ -z "${VERSION_CODE:-}" ]; then
+    VERSION_CODE="$(printf '%s' "$VERSION_NAME" | awk -F. '
+        {
+            maj=$1; sub(/^[vV]/, "", maj);
+            min=$2;
+            pat=$3; if (pat == "") pat = "0";
+            if (maj !~ /^[0-9]+$/ || min !~ /^[0-9]+$/ || pat !~ /^[0-9]+$/) { print "ERRPARSE"; exit }
+            if (pat + 0 > 999) { print "ERRPATCH"; exit }
+            printf "%d", (maj + 0) * 10000 + (min + 0) * 1000 + (pat + 0)
+        }')"
+    case "$VERSION_CODE" in
+        ERRPARSE) die "无法从 VERSION_NAME 推导 versionCode：'$VERSION_NAME'（需 major.minor.patch 纯数字）" ;;
+        ERRPATCH) die "VERSION_NAME '$VERSION_NAME' 的 patch 超过 999，无法推导 versionCode" ;;
+    esac
+    echo "→ versionCode 由 VERSION_NAME 推导：$VERSION_NAME -> $VERSION_CODE"
+fi
 
 # --- 工具 -----------------------------------------------------------
 

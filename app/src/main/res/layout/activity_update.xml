@@ -111,6 +111,20 @@
             android:layout_marginTop="8dp"
             android:text="@string/update_rollback" />
 
+        <Button
+            android:id="@+id/change_source"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/update_change_source" />
+
+        <Button
+            android:id="@+id/test_source"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/update_test_source" />
+
         <TextView
             android:id="@+id/label_notes"
             android:layout_width="match_parent"

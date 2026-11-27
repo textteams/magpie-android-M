@@ -56,18 +56,17 @@ final class ShellUpdateFlow {
             final String mirror = Prefs.shellMirror(act);
             AlertDialog dlg = new AlertDialog.Builder(act)
                     .setTitle(R.string.shell_update_title)
-                    .setMessage(act.getString(R.string.shell_update_auto_found, r.latestTag))
+                    .setMessage(act.getString(R.string.shell_update_auto_found, r.latestTag)
+                            + pkgNote(r))
                     .setPositiveButton(R.string.shell_download_install, (d, w) -> {
                         if (r.hasApk()) {
                             downloadAndInstall(act, ShellUpdater.mirrored(mirror, r.downloadUrl),
                                     onStyle);
                         } else {
-                            try {
-                                act.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(r.page)));
-                            } catch (Exception ignored) {
-                            }
+                            openPage(act, r.page);
                         }
                     })
+                    .setNeutralButton(R.string.shell_open_page, (d, w) -> openPage(act, r.page))
                     .setNegativeButton(android.R.string.cancel, null)
                     .create();
             if (onStyle != null) {
@@ -84,8 +83,11 @@ final class ShellUpdateFlow {
             if (!r.ok()) {
                 AlertDialog dlg = new AlertDialog.Builder(act)
                         .setTitle(R.string.shell_update_title)
-                        .setMessage(act.getString(R.string.shell_update_failed, r.error))
+                        .setMessage(act.getString(R.string.shell_update_failed, r.error)
+                                + "\n可换一个更新源（镜像）后重试。")
                         .setPositiveButton(android.R.string.ok, null)
+                        .setNeutralButton(R.string.update_change_source,
+                                (d, w) -> UpdateMirror.showPicker(act, null))
                         .create();
                 if (onStyle != null) {
                     onStyle.apply(dlg);
@@ -116,7 +118,7 @@ final class ShellUpdateFlow {
             AlertDialog dlg = new AlertDialog.Builder(act)
                     .setTitle(R.string.shell_update_title)
                     .setMessage(act.getString(R.string.shell_update_available_download,
-                            r.latestTag, mirrorName))
+                            r.latestTag, mirrorName) + pkgNote(r))
                     .setPositiveButton(R.string.shell_download_install,
                             (d, w) -> downloadAndInstall(act, url, onStyle))
                     .setNeutralButton(R.string.shell_open_page,
@@ -128,6 +130,22 @@ final class ShellUpdateFlow {
             }
             dlg.show();
         });
+    }
+
+    /** 提示本次下载哪种包：壳子包（不换内核）/ 完整包。没有可下 APK 时返回空串。 */
+    private static String pkgNote(ShellUpdater.Result r) {
+        if (r == null || !r.hasApk()) {
+            return "";
+        }
+        return "\n\n本次下载：" + pkgKindLabel(r.downloadUrl);
+    }
+
+    private static boolean isShellApk(String url) {
+        return url != null && url.toLowerCase(java.util.Locale.US).endsWith("-shell.apk");
+    }
+
+    private static String pkgKindLabel(String url) {
+        return isShellApk(url) ? "壳子包（不换内核）" : "完整包";
     }
 
     private static void openPage(Activity act, String url) {
@@ -189,8 +207,11 @@ final class ShellUpdateFlow {
                 if (why != null || file == null) {
                     AlertDialog dlg = new AlertDialog.Builder(act)
                             .setTitle(R.string.shell_update_title)
-                            .setMessage(act.getString(R.string.shell_download_failed, why))
+                            .setMessage(act.getString(R.string.shell_download_failed, why)
+                                    + "\n\n可到 Release 页手动下载完整包（没装内核、或壳子包不适用时，请下完整包）。")
                             .setPositiveButton(android.R.string.ok, null)
+                            .setNeutralButton(R.string.shell_open_page,
+                                    (d, w) -> openPage(act, ShellUpdater.releasesPage()))
                             .create();
                     if (onStyle != null) {
                         onStyle.apply(dlg);
@@ -198,6 +219,8 @@ final class ShellUpdateFlow {
                     dlg.show();
                     return;
                 }
+                Toast.makeText(act, "已下载" + pkgKindLabel(url) + "，正在打开安装器…",
+                        Toast.LENGTH_SHORT).show();
                 install(act, file);
             });
         }, "magpie-apk-download").start();
@@ -205,7 +228,8 @@ final class ShellUpdateFlow {
 
     private static void install(Activity act, File apk) {
         try {
-            Uri uri = Uri.parse("content://" + ApkFileProvider.AUTHORITY + "/" + apk.getName());
+            // 走 "apk/<名>" 路径分段（ApkFileProvider 按第一段分发到 cacheDir/apk）。
+            Uri uri = Uri.parse("content://" + ApkFileProvider.AUTHORITY + "/apk/" + apk.getName());
             Intent i = new Intent(Intent.ACTION_VIEW);
             i.setDataAndType(uri, "application/vnd.android.package-archive");
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);

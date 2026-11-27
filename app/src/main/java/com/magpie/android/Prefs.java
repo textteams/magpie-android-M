@@ -523,6 +523,27 @@ public final class Prefs {
         }
     }
 
+    /** 控制后台最后停留的完整 URL（含 ?k=，仅 http/https 内部页）。 */
+    public static String lastWebUrl(Context ctx) {
+        String v = sp(ctx).getString("last_web_url", "");
+        return v == null ? "" : v;
+    }
+
+    public static void setLastWebUrl(Context ctx, String url) {
+        if (url == null) {
+            return;
+        }
+        String u = url.trim();
+        if (u.isEmpty() || u.length() > 2000) {
+            return;
+        }
+        String low = u.toLowerCase(java.util.Locale.US);
+        if (!low.startsWith("http://") && !low.startsWith("https://")) {
+            return; // 只存 http(s)，别存 javascript:/data:
+        }
+        sp(ctx).edit().putString("last_web_url", u).apply();
+    }
+
     public static void setPort(Context ctx, String p) {
         try {
             int v = Integer.parseInt(p.trim());

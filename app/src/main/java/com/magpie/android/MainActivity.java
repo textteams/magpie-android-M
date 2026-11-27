@@ -105,6 +105,10 @@ public class MainActivity extends Activity {
     private volatile ValueCallback<Uri[]> fileCallback;
     /** 文件选择器是否已经在前台：防止同时弹出两个 chooser 抢同一个回调。 */
     private volatile boolean fileChooserActive;
+
+    /** 「跳转到某页」的轮次号与待撤销的定时任务：页面重载/销毁时整体作废。 */
+    private int jumpGen;
+    private final java.util.ArrayList<Runnable> jumpTasks = new java.util.ArrayList<>();
     /** 重建 WebView 期间挡住重复回调，别一次死两个进程建出三个页面。 */
     private volatile boolean webRebuilding;
     /** Activity 不可见后，按设置延迟释放 WebView；不碰 GatewayService。 */
@@ -313,6 +317,12 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         GatewayService.syncNotification(this, GatewayService.isAlive());
+        // 已经有一扇 MainActivity 在栈上（singleTop）时，若这次带 view，按新 URL 重新加载一次
+        String v = sanitizeView(intent == null ? null : intent.getStringExtra(EXTRA_VIEW));
+        if (v != null && web != null) {
+            loaded = false;
+            loadPage();
+        }
     }
 
     @Override
@@ -482,6 +492,12 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 if (isInternal(url)) {
                     loaded = true;
+                    // 记住控制后台最后停留的完整地址（含 ?k=），供菜单「复制上次网页地址」用
+                    try {
+                        Prefs.setLastWebUrl(MainActivity.this,
+                                view != null ? view.getUrl() : url);
+                    } catch (Exception ignored) {
+                    }
                     hideOverlay();
                     jumpToRequestedView();
                     if (!GatewayService.isAlive()) {
@@ -641,6 +657,9 @@ public class MainActivity extends Activity {
 
     /** 彻底销毁当前 WebView 并置空（后台释放与 Activity 销毁共用，避免泄漏）。 */
     private void destroyWeb() {
+        // 页面要销毁/重建：作废所有待跑的跳转重试
+        jumpGen++;
+        cancelJumpTasks();
         WebView w = web;
         if (w == null) {
             return;
@@ -885,13 +904,44 @@ public class MainActivity extends Activity {
         }, "magpie-wait").start();
     }
 
+    /** 只允许 [a-z0-9_-]{1,32}，其余当空（防注入 / 防拼坏 URL）。 */
+    static String sanitizeView(String v) {
+        if (v == null) {
+            return null;
+        }
+        String s = v.trim();
+        if (s.isEmpty() || s.length() > 32) {
+            return null;
+        }
+        return s.matches("[a-z0-9_-]{1,32}") ? s : null;
+    }
+
+    /**
+     * 把「要落的 view」拼进 magpie 网页 URL：{@code ...?k=<key>&view=<v>#view=<v>}。
+     * 网页路由认 query {@code view=} + hash {@code #view=}，直接按 URL 打开即可落到目标页。
+     */
+    static String withView(Context ctx, String view) {
+        String base = GatewayService.webUrl(ctx);
+        String v = sanitizeView(view);
+        if (v == null || v.isEmpty()) {
+            return base;
+        }
+        try {
+            String enc = java.net.URLEncoder.encode(v, "UTF-8");
+            return base + "&view=" + enc + "#view=" + enc;
+        } catch (Exception e) {
+            return base;
+        }
+    }
+
     private void loadPage() {
         if (loaded) {
             return;
         }
         loaded = true;
         hideOverlay();
-        String url = GatewayService.webUrl(this);
+        String view = getIntent() == null ? null : getIntent().getStringExtra(EXTRA_VIEW);
+        String url = withView(this, view);
         Log.i(TAG, "loading " + url);
         web.loadUrl(url);
     }
@@ -910,45 +960,155 @@ public class MainActivity extends Activity {
      * 全都失败就留在原页，不报错。
      */
     private void jumpToRequestedView() {
-        String want = getIntent() == null ? null : getIntent().getStringExtra(EXTRA_VIEW);
+        String want = sanitizeView(getIntent() == null ? null
+                : getIntent().getStringExtra(EXTRA_VIEW));
         if (want == null || want.isEmpty()) {
             return;
         }
-        // 用掉就清掉，免得页面刷新又跳一次
-        getIntent().removeExtra(EXTRA_VIEW);
-        if (want.indexOf('\'') >= 0 || want.indexOf('"') >= 0) {
-            return; // 防注入
-        }
-
-        String js = "(function(){\n"
-                + "var want=" + jsStr(want) + ";\n"
-                + "function find(scope){\n"
-                + "  var bs=(scope||document).querySelectorAll('button[data-view]');\n"
-                + "  for(var i=0;i<bs.length;i++) if(bs[i].getAttribute('data-view')===want) return bs[i];\n"
-                + "  return null;\n"
-                + "}\n"
-                + "var b=find();\n"
-                + "if(b){b.click();return;}\n"
-                + "// 手机版可能把它收进了「更多」\n"
-                + "var more=document.querySelector('#nav .nav-more')||document.querySelector('#nav [data-more]');\n"
-                + "if(more){more.click();}\n"
-                + "setTimeout(function(){\n"
-                + "  var b2=find()||find(document.body);\n"
-                + "  if(b2){b2.click();return;}\n"
-                + "  // 最后按文字找\n"
-                + "  var txt={plugins:['插件','Plugins'],providers:['供应商','Providers'],usage:['用量','Usage'],routing:['路由','Routing'],library:['资源库','Library'],masking:['脱敏','Masking']}[want]||[];\n"
-                + "  var all=document.querySelectorAll('button, a, [role=button]');\n"
-                + "  for(var i=0;i<all.length;i++){\n"
-                + "    var s=(all[i].textContent||'').trim();\n"
-                + "    for(var k=0;k<txt.length;k++) if(s===txt[k]){all[i].click();return;}\n"
-                + "  }\n"
-                + "},350);\n"
-                + "})();";
+        // 已经按 ?view=/#view= 直接打开了目标页：无需再模拟点击
+        // （下面 6 轮点击只作为 URL 未带 view= 时的兜底）
         try {
-            web.evaluateJavascript(js, null);
-        } catch (Exception e) {
-            Log.w(TAG, "跳转到 " + want + " 失败: " + e);
+            String cur = web == null ? null : web.getUrl();
+            if (cur != null && cur.contains("view=")) {
+                if (getIntent() != null) {
+                    getIntent().removeExtra(EXTRA_VIEW);
+                }
+                return;
+            }
+        } catch (Exception ignored) {
         }
+        final String w = want;
+        final String[] texts = textsFor(w);
+        // 新一轮：作废上一轮所有待跑任务，然后按 [200,600,1200,2000,3000,4500]ms 依次尝试
+        final int gen = ++jumpGen;
+        cancelJumpTasks();
+        final long[] delays = {200, 600, 1200, 2000, 3000, 4500};
+        for (int i = 0; i < delays.length; i++) {
+            final int attempt = i;
+            Runnable r = () -> attemptJump(gen, w, texts, attempt);
+            jumpTasks.add(r);
+            ui.postDelayed(r, delays[i]);
+        }
+    }
+
+    /** 一次尝试：先执行「hash + data-view 点击 + 文字匹配」的 JS，320ms 后再校验是否到位。 */
+    private void attemptJump(final int gen, final String want, final String[] texts,
+                             final int attempt) {
+        if (gen != jumpGen || web == null || isFinishing() || isDestroyed()) {
+            return;
+        }
+        try {
+            web.evaluateJavascript(jumpActionJs(want, texts), null);
+        } catch (Exception e) {
+            Log.w(TAG, "跳转动作失败(" + want + "): " + e);
+            return;
+        }
+        ui.postDelayed(() -> verifyJump(gen, want, texts, attempt), 320);
+    }
+
+    /** 校验目标页是否已经显示；成功就停掉后续重试并清掉 EXTRA_VIEW。 */
+    private void verifyJump(final int gen, final String want, final String[] texts,
+                            final int attempt) {
+        if (gen != jumpGen || web == null || isFinishing() || isDestroyed()) {
+            return;
+        }
+        try {
+            web.evaluateJavascript(jumpVerifyJs(want, texts), value -> {
+                if (gen != jumpGen) {
+                    return;
+                }
+                if (isJsTrue(value)) {
+                    // 确认到位：清掉 extra，作废剩余轮次
+                    jumpGen++;
+                    cancelJumpTasks();
+                    if (getIntent() != null) {
+                        getIntent().removeExtra(EXTRA_VIEW);
+                    }
+                    Log.i(TAG, "已跳到 " + want + "（第 " + (attempt + 1) + " 轮确认）");
+                }
+            });
+        } catch (Exception e) {
+            Log.w(TAG, "校验跳转失败(" + want + "): " + e);
+        }
+    }
+
+    private void cancelJumpTasks() {
+        for (Runnable r : jumpTasks) {
+            ui.removeCallbacks(r);
+        }
+        jumpTasks.clear();
+    }
+
+    private static boolean isJsTrue(String v) {
+        if (v == null) {
+            return false;
+        }
+        return v.trim().startsWith("true");
+    }
+
+    /** 各 view 的中/英文文案（按文字匹配按钮时用）。 */
+    private static String[] textsFor(String want) {
+        switch (want) {
+            case "library": return new String[]{"资源库", "Library"};
+            case "plugins": return new String[]{"插件", "Plugins"};
+            case "providers": return new String[]{"供应商", "Providers"};
+            case "usage": return new String[]{"用量", "Usage"};
+            case "routing": return new String[]{"路由", "Routing"};
+            case "masking": return new String[]{"脱敏", "Masking"};
+            default: return new String[]{want};
+        }
+    }
+
+    /** 执行动作的 JS：hash → data-view 点击/展开更多 → 文字匹配。 */
+    private static String jumpActionJs(String want, String[] texts) {
+        return "(function(){\n"
+                + "var want=" + jsStr(want) + ";\n"
+                + "var txt=" + jsStrArray(texts) + ";\n"
+                + "try{ if(location.hash!=='#view='+want){ location.hash='view='+want;\n"
+                + "  try{window.dispatchEvent(new HashChangeEvent('hashchange'));}catch(e){}\n"
+                + "} }catch(e){}\n"
+                + "var found=false;\n"
+                + "var bs=document.querySelectorAll('[data-view]');\n"
+                + "for(var i=0;i<bs.length;i++){ if(bs[i].getAttribute('data-view')===want){\n"
+                + "  try{bs[i].click();found=true;}catch(e){} break; } }\n"
+                + "if(!found){ var more=document.querySelector('#nav .nav-more')||document.querySelector('#nav [data-more]');\n"
+                + "  if(more){ try{more.click();}catch(e){} } }\n"
+                + "var all=document.querySelectorAll('button, a, [role=button]');\n"
+                + "for(var i=0;i<all.length;i++){ var s=(all[i].textContent||'').trim();\n"
+                + "  for(var k=0;k<txt.length;k++){ if(s===txt[k]){ try{all[i].click();}catch(e){} } } }\n"
+                + "return true;\n"
+                + "})();";
+    }
+
+    /** 校验的 JS：nav 选中态 / 目标容器可见 / 标题文字 / hash —— 任一命中即 true。 */
+    private static String jumpVerifyJs(String want, String[] texts) {
+        return "(function(){\n"
+                + "var want=" + jsStr(want) + ";\n"
+                + "var txt=" + jsStrArray(texts) + ";\n"
+                + "function active(el){ var c=(el.className||'')+' '+(el.getAttribute&&el.getAttribute('class')||'');\n"
+                + "  return /(^|\\s)(active|selected|current|is-active)(\\s|$)/.test(c) || el.getAttribute('aria-selected')==='true'; }\n"
+                + "var bs=document.querySelectorAll('[data-view]');\n"
+                + "for(var i=0;i<bs.length;i++){ if(bs[i].getAttribute('data-view')===want && active(bs[i])) return true; }\n"
+                + "var el=document.querySelector('#view-'+want)||document.querySelector('[data-page=\"'+want+'\"]')||document.getElementById(want);\n"
+                + "if(el){ var st=getComputedStyle(el);\n"
+                + "  if(st.display!=='none'&&st.visibility!=='hidden'&&el.offsetParent!==null) return true; }\n"
+                + "var heads=document.querySelectorAll('h1,h2,h3,[role=heading]');\n"
+                + "for(var i=0;i<heads.length;i++){ var s=(heads[i].textContent||'').trim();\n"
+                + "  for(var k=0;k<txt.length;k++){ if(s===txt[k]) return true; } }\n"
+                + "if(location.hash.indexOf('view='+want)>=0) return true;\n"
+                + "return false;\n"
+                + "})();";
+    }
+
+    private static String jsStrArray(String[] arr) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < arr.length; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(jsStr(arr[i]));
+        }
+        return sb.append(']').toString();
     }
 
     /** Java 字符串 → JS 字符串字面量（只用来塞 view 名，很短）。 */

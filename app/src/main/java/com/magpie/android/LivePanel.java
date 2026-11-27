@@ -32,6 +32,9 @@ final class LivePanel {
     private LinearLayout statRerouted;
     private LinearLayout statErrors;
 
+    /** 最近一次 trace 的 totals（请求/改道/错误），底部计数用。 */
+    private JSONObject lastTotals;
+
     private final TraceSource source = new TraceSource();
 
     /** 每次 trace 回来顺手转一份给别人（请求记录区要用同一批 routes）。 */
@@ -45,6 +48,11 @@ final class LivePanel {
     private static final int MAX_LIVE = 30;
     private static final long DONE_TTL_MS = 20_000L;
     private final java.util.LinkedHashMap<Long, Entry> entries = new java.util.LinkedHashMap<>();
+
+    /** 组头「收起/展开」状态，跨多次 trace 刷新保持。 */
+    private boolean treeCollapsed = false;
+    /** 决策树里各供应商的展开/收起状态（key=provider id；在集合里=已收起）。 */
+    private final java.util.Set<String> provCollapsed = new java.util.HashSet<>();
 
     private static final class Entry {
         long id;
@@ -72,25 +80,7 @@ final class LivePanel {
                 ui.weight(1));
         root.addView(head, wrapLp());
 
-        // 三个计数拆成独立一格：它们是「运行态证据」（有没有出错），
-        // 压成一行灰字贴在标题屁股上，等于把最想确认的东西藏起来。
-        LinearLayout counters = ui.row();
-        counters.setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0);
-        statRequests = counterCell("请求", M3.ON_SURFACE);
-        statRerouted = counterCell("改道", M3.ON_SURFACE);
-        statErrors = counterCell("错误", M3.ERROR);
-        counters.addView(statRequests, ui.weight(1));
-        counters.addView(statRerouted, ui.weight(1));
-        counters.addView(statErrors, ui.weight(1));
-        root.addView(counters, wrapLp());
-
-        TextView hint = ui.text("等待请求；经 agent 发出请求后，这里实时播放："
-                        + "路由把谁排第一及原因、每次尝试和各自的回应。",
-                11, M3.ON_SURFACE_VARIANT, false);
-        hint.setPadding(ui.dp(20), ui.dp(4), ui.dp(20), 0);
-        hint.setLineSpacing(ui.dp(2), 1f);
-        root.addView(hint, wrapLp());
-
+        // 顶部只保留标题；「请求/改道/错误」计数与提示语都移到面板底部（见 syncBody/renderEmpty）。
         body = ui.column();
         body.setPadding(0, ui.dp(10), 0, 0);
         root.addView(body, wrapLp());
@@ -157,9 +147,7 @@ final class LivePanel {
 
     private void apply(JSONArray routes, JSONObject totals) {
         if (totals != null) {
-            setCounter(statRequests, NativeData.num(totals, "requests"));
-            setCounter(statRerouted, NativeData.num(totals, "rerouted"));
-            setCounter(statErrors, NativeData.num(totals, "errors"));
+            lastTotals = totals;   // 底部计数用（顶部已不再显示）
         }
         long now = System.currentTimeMillis();
         if (routes != null) {
@@ -217,9 +205,9 @@ final class LivePanel {
     }
 
     /**
-     * 像 magpie 网页那样：左边列出当前并发的所有 agent（同一 agent+模型去重成一张源卡），
-     * 汇到右边一个 magpie，再往下展开「当前这次路由决定」选中的账号与候选。
-     * 不再每来一条请求就叠一个块（那会反复跳/重复）。
+     * 照 magpie 手机网页版：一条 featured route 渲染成一棵「分层决策树」——
+     * 组头 + 策略说明 + Agent→magpie + 按 provider 分组的候选账号（可展开）+ 底部解释。
+     * 取「最新进行中」的那条 route 作为 featured（都在跑就取最新一条）。
      */
     private void syncBody() {
         if (entries.isEmpty()) {
@@ -228,24 +216,6 @@ final class LivePanel {
         }
         java.util.List<Entry> list = new java.util.ArrayList<>(entries.values());
         list.sort((a, b) -> Long.compare(b.id, a.id)); // 新的在上
-
-        // 去重出「当前有哪些 agent 在请求」（agent+模型 作为一张卡，最多 8 张）
-        java.util.LinkedHashMap<String, Entry> agents = new java.util.LinkedHashMap<>();
-        for (Entry e : list) {
-            String key = NativeData.str(e.route, "agent", "") + "|"
-                    + NativeData.str(e.route, "model", "");
-            if (!agents.containsKey(key)) {
-                agents.put(key, e);
-            }
-            if (agents.size() >= 8) {
-                break;
-            }
-        }
-
-        body.removeAllViews();
-        body.addView(sourcesRow(agents, list.get(0)));
-
-        // 当前决定 = 最新的、还在进行中的那条；都在跑就用最新的一条
         Entry feat = null;
         for (Entry e : list) {
             if (!e.done) {
@@ -256,20 +226,765 @@ final class LivePanel {
         if (feat == null) {
             feat = list.get(0);
         }
-        JSONObject route = feat.route;
-        JSONArray tries = NativeData.arr(route, "tries");
-        String answered = null;
-        if (tries.length() > 0) {
-            JSONObject last = tries.optJSONObject(tries.length() - 1);
-            if (last != null) {
-                answered = NativeData.str(last, "id", null);
+        final JSONObject route = feat.route;
+        final JSONObject group = NativeData.obj(route, "group");
+
+        body.removeAllViews();
+
+        // 主体容器：组头右侧的「收起/展开」控制它的显隐
+        final LinearLayout main = ui.column();
+        main.setLayoutParams(wrapLp());
+
+        // 组头：<组名> · 启用 N 个        [收起/展开]
+        LinearLayout header = ui.row();
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(ui.dp(20), ui.dp(10), ui.dp(20), ui.dp(4));
+        String grpName = groupName(group);
+        int enabled = enabledCount(group, route);
+        LinearLayout titleWrap = ui.row();
+        titleWrap.setGravity(Gravity.CENTER_VERTICAL);
+        TextView grpTitle = ui.text(grpName, 15, M3.ON_SURFACE, true);
+        grpTitle.setSingleLine(true);
+        grpTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        titleWrap.addView(grpTitle);
+        TextView grpCount = ui.text(" · 启用 " + enabled + " 个", 13,
+                M3.ON_SURFACE_VARIANT, false);
+        grpCount.setSingleLine(true);
+        titleWrap.addView(grpCount);
+        header.addView(titleWrap, ui.weight(1));
+        final TextView toggle = ui.text(treeCollapsed ? "展开" : "收起", 12, M3.PRIMARY, true);
+        toggle.setPadding(ui.dp(8), ui.dp(4), ui.dp(4), ui.dp(4));
+        header.addView(toggle);
+        header.setClickable(true);
+        main.setVisibility(treeCollapsed ? View.GONE : View.VISIBLE);
+        header.setOnClickListener(v -> {
+            treeCollapsed = !treeCollapsed;
+            main.setVisibility(treeCollapsed ? View.GONE : View.VISIBLE);
+            toggle.setText(treeCollapsed ? "展开" : "收起");
+        });
+        body.addView(header, wrapLp());
+
+        // 策略说明
+        main.addView(policyNote(group));
+        // Agent → magpie
+        main.addView(agentToMagpie(route, group));
+        // 决策树（按 provider 分组）
+        main.addView(decisionTree(route));
+        // 底部决策解释
+        main.addView(bottomExplain(route));
+        // 底部计数：请求 / 改道 / 错误
+        main.addView(bottomCounters());
+
+        body.addView(main, wrapLp());
+    }
+
+    // ------------------------------------------------------------------
+    // 分层决策树（Phase 1）
+    // ------------------------------------------------------------------
+
+    private String groupName(JSONObject group) {
+        if (group == null) {
+            return "路由组";
+        }
+        String n = NativeData.str(group, "ref", NativeData.str(group, "name", ""));
+        return n.isEmpty() ? "路由组" : n;
+    }
+
+    /** 启用数：优先 group.members 长度，否则用 order 里去重后的账号数。 */
+    private int enabledCount(JSONObject group, JSONObject route) {
+        if (group != null) {
+            JSONArray m = NativeData.arr(group, "members");
+            if (m.length() > 0) {
+                return m.length();
             }
         }
-        boolean done = NativeData.flag(route, "done");
-        int status = NativeData.num(route, "status");
-        body.addView(connector(answered != null, done, status));
-        body.addView(orderList(route, answered, tries, done, status));
-        body.addView(excluded(route));
+        JSONArray order = NativeData.arr(route, "order");
+        java.util.HashSet<String> ids = new java.util.HashSet<>();
+        for (int i = 0; i < order.length(); i++) {
+            JSONObject w = order.optJSONObject(i);
+            if (w != null) {
+                String id = NativeData.str(w, "id", "");
+                if (!id.isEmpty()) {
+                    ids.add(id);
+                }
+            }
+        }
+        return ids.size();
+    }
+
+    private View policyNote(JSONObject group) {
+        String routing = group == null ? "" : NativeData.str(group, "routing", "");
+        TextView t = ui.text(routingExplain(routing), 11.5f, M3.ON_SURFACE_VARIANT, false);
+        t.setLineSpacing(ui.dp(3), 1f);
+        t.setPadding(ui.dp(20), ui.dp(6), ui.dp(20), ui.dp(8));
+        return t;
+    }
+
+    private String routingExplain(String routing) {
+        String r = routing == null ? "" : routing.toLowerCase(java.util.Locale.US);
+        if (r.contains("pace")) {
+            return "额度优先：余额最先重置的账号排前面，避免额度在重置时作废；"
+                    + "用到 90% 以上的留到其他都无法响应时才用；失败后休息中的排最后。";
+        }
+        if (r.contains("smart")) {
+            return "智能：按可用额度、模型匹配与历史成功率综合排序，优先选能直接回答的账号。";
+        }
+        if (r.isEmpty()) {
+            return "按可用额度与匹配度排序：能直接回答的账号排前面，失败/暂停的排后面。";
+        }
+        return "路由策略：" + routing + "（按可用额度与匹配度排序，失败/暂停的排后面）。";
+    }
+
+    private String routingLabel(String routing) {
+        String r = routing == null ? "" : routing.toLowerCase(java.util.Locale.US);
+        if (r.contains("pace")) {
+            return "额度优先";
+        }
+        if (r.contains("smart")) {
+            return "智能";
+        }
+        return (routing == null || routing.isEmpty()) ? "路由" : routing;
+    }
+
+    /** Agent 卡 → 箭头 → magpie 卡（带 routing 标签胶囊）。 */
+    private View agentToMagpie(JSONObject route, JSONObject group) {
+        LinearLayout row = ui.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(ui.dp(20), ui.dp(4), ui.dp(20), ui.dp(6));
+        row.setLayoutParams(lp);
+
+        String agent = NativeData.str(route, "agent", "");
+        String model = NativeData.str(route, "model", "");
+        String who = (agent == null || agent.isEmpty()) ? "等待请求" : NativeData.pretty(agent);
+        row.addView(agentCard(who, model),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView arrow = ui.text("\u2192", 14, M3.OUTLINE, false);
+        arrow.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                ui.dp(28), ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.gravity = Gravity.CENTER_VERTICAL;
+        row.addView(arrow, alp);
+
+        LinearLayout mag = box(Prefs.browserHost(host) + ":" + GatewayService.gatewayPort(host),
+                "magpie", null, true, false);
+        String routing = group == null ? "" : NativeData.str(group, "routing", "");
+        TextView chip = badge(routingLabel(routing),
+                ui.col(M3.SECONDARY_CONTAINER), ui.col(M3.ON_SECONDARY_CONTAINER));
+        LinearLayout.LayoutParams chlp = ui.wrap();
+        chlp.topMargin = ui.dp(4);
+        mag.addView(chip, chlp);
+        row.addView(mag, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
+    }
+
+    /** 网页样式的 Agent 卡：● 名称 + 模型（等宽小字），圆角居中，无抬头。 */
+    private LinearLayout agentCard(String name, String model) {
+        LinearLayout box = ui.column();
+        GradientDrawable bg = ui.roundStroke(ui.col(M3.SURFACE_CONTAINER_LOW), 14,
+                ui.col(M3.OUTLINE_VARIANT), 1f);
+        box.setBackground(bg);
+        box.setPadding(ui.dp(12), ui.dp(12), ui.dp(12), ui.dp(12));
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        LinearLayout nameRow = ui.row();
+        nameRow.setGravity(Gravity.CENTER_VERTICAL);
+        nameRow.addView(dot(M3.PRIMARY, 7));
+        TextView n = ui.text(name, 13, M3.ON_SURFACE, true);
+        n.setSingleLine(true);
+        n.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        LinearLayout.LayoutParams nlp = ui.wrap();
+        nlp.leftMargin = ui.dp(6);
+        nameRow.addView(n, nlp);
+        box.addView(nameRow);
+
+        if (model != null && !model.isEmpty()) {
+            TextView m = ui.mono(model, 9.5f, M3.ON_SURFACE_VARIANT);
+            m.setSingleLine(true);
+            m.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            m.setGravity(Gravity.CENTER);
+            m.setLayoutParams(ui.matchWrap(6));
+            box.addView(m);
+        }
+        return box;
+    }
+
+    /** 决策树主体：order[] 按 provider 分组，每组一行供应商 + 其下可展开的账号行。 */
+    private View decisionTree(JSONObject route) {
+        LinearLayout wrap = ui.column();
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(ui.dp(16), ui.dp(2), ui.dp(16), ui.dp(2));
+        wrap.setLayoutParams(lp);
+
+        JSONArray order = NativeData.arr(route, "order");
+        if (order.length() == 0) {
+            return wrap;
+        }
+        JSONArray tries = NativeData.arr(route, "tries");
+        String answeredId = lastAnsweredId(tries);
+
+        java.util.LinkedHashMap<String, java.util.List<JSONObject>> byProv =
+                new java.util.LinkedHashMap<>();
+        for (int i = 0; i < order.length(); i++) {
+            JSONObject w = order.optJSONObject(i);
+            if (w == null) {
+                continue;
+            }
+            String prov = NativeData.str(w, "provider", "");
+            if (prov.isEmpty()) {
+                prov = NativeData.str(w, "name", "");
+            }
+            if (prov.isEmpty()) {
+                prov = "?";
+            }
+            java.util.List<JSONObject> g = byProv.get(prov);
+            if (g == null) {
+                g = new java.util.ArrayList<>();
+                byProv.put(prov, g);
+            }
+            g.add(w);
+        }
+
+        int shown = 0;
+        for (java.util.Map.Entry<String, java.util.List<JSONObject>> e : byProv.entrySet()) {
+            if (shown >= 10) {
+                break;
+            }
+            wrap.addView(providerRow(route, e.getKey(), e.getValue(), tries, answeredId));
+            shown++;
+        }
+        return wrap;
+    }
+
+    /** 最后一个「成功」try 的 id（没有成功的就退回最后一条 try 的 id）。 */
+    private String lastAnsweredId(JSONArray tries) {
+        String lastAny = null;
+        for (int i = 0; i < tries.length(); i++) {
+            JSONObject t = tries.optJSONObject(i);
+            if (t != null) {
+                String id = NativeData.str(t, "id", "");
+                if (!id.isEmpty()) {
+                    lastAny = id;
+                }
+            }
+        }
+        for (int i = tries.length() - 1; i >= 0; i--) {
+            JSONObject t = tries.optJSONObject(i);
+            if (t != null && NativeData.flag(t, "done")
+                    && NativeData.num(t, "status") < 400) {
+                String id = NativeData.str(t, "id", "");
+                if (!id.isEmpty()) {
+                    return id;
+                }
+            }
+        }
+        return lastAny;
+    }
+
+    private String providerDisplay(String provKey, JSONObject w) {
+        // 供应商行显示供应商名（不用账号昵称）：内置映射 → Zh.of → 首字母大写 → 原 id。
+        if (provKey == null || provKey.isEmpty()) {
+            return "供应商";
+        }
+        String key = provKey.trim();
+        String lower = key.toLowerCase(java.util.Locale.US);
+        String builtin = builtinProviderName(lower);
+        if (builtin != null) {
+            return builtin;
+        }
+        String z = Zh.of(key);
+        if (z != null && !z.isEmpty() && !z.equalsIgnoreCase(key)) {
+            return z;
+        }
+        // 全小写 ascii（xxx / xxx-yyy）→ 首字母大写
+        if (lower.equals(key) && key.matches("[a-z0-9._-]+")) {
+            return Character.toUpperCase(key.charAt(0)) + key.substring(1);
+        }
+        return key;
+    }
+
+    /** 常见供应商 id → 展示名（覆盖 ProviderIcons 里那批 + workbuddy/free）。 */
+    private static String builtinProviderName(String lower) {
+        switch (lower) {
+            case "workbuddy": return "WorkBuddy";
+            case "free": return "免费";
+            case "antigravity": return "Antigravity";
+            case "trae":
+            case "trae-cn": return "Trae";
+            case "qwen":
+            case "qwenwork": return "Qwen";
+            case "openai": return "OpenAI";
+            case "anthropic": return "Anthropic";
+            case "claude":
+            case "claude-code": return "Claude";
+            case "gemini": return "Gemini";
+            case "moonshot":
+            case "kimi": return "Kimi";
+            case "zhipu":
+            case "zai": return "Zhipu";
+            case "openrouter": return "OpenRouter";
+            case "siliconcloud": return "SiliconCloud";
+            case "volcengine": return "Volcengine";
+            case "baidu": return "Baidu";
+            case "tencent": return "Tencent";
+            case "xai": return "xAI";
+            case "mistral": return "Mistral";
+            case "groq": return "Groq";
+            case "together": return "Together";
+            case "fireworks": return "Fireworks";
+            case "cerebras": return "Cerebras";
+            case "perplexity": return "Perplexity";
+            case "copilot": return "Copilot";
+            case "cursor": return "Cursor";
+            case "windsurf": return "Windsurf";
+            case "cline": return "Cline";
+            case "opencode": return "OpenCode";
+            case "zed": return "Zed";
+            case "ollama": return "Ollama";
+            case "lmstudio": return "LM Studio";
+            default: return null;
+        }
+    }
+
+    private View providerRow(JSONObject route, String provKey, java.util.List<JSONObject> items,
+                             JSONArray tries, String answeredId) {
+        JSONObject w0 = items.get(0);
+        String label = providerDisplay(provKey, w0);
+        String repModel = "";
+        for (JSONObject x : items) {
+            String mm = NativeData.str(x, "model", "");
+            if (!mm.isEmpty()) {
+                repModel = shortModel(mm);
+                break;
+            }
+        }
+        final boolean collapsed = provCollapsed.contains(provKey);
+
+        LinearLayout wrap = ui.column();
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wlp.bottomMargin = ui.dp(8);
+        wrap.setLayoutParams(wlp);
+
+        LinearLayout head = ui.row();
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable hbg = ui.roundStroke(ui.col(M3.SURFACE_CONTAINER_LOW), 12,
+                ui.col(M3.OUTLINE_VARIANT), 1f);
+        ui.clickable(head, hbg);
+        head.setPadding(ui.dp(10), ui.dp(8), ui.dp(10), ui.dp(8));
+
+        int icon = ProviderIcons.of(host, NativeData.str(w0, "icon", ""),
+                NativeData.str(w0, "provider", ""), NativeData.str(w0, "preset", ""));
+        if (icon == 0) {
+            // 兜底：用 provider id 再查一次（icon/preset 缺失时）
+            icon = ProviderIcons.of(host, "", provKey, "");
+        }
+        if (icon != 0) {
+            android.widget.ImageView iv = new android.widget.ImageView(host);
+            iv.setImageResource(icon);
+            iv.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+            head.addView(iv, new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)));
+        } else {
+            head.addView(dot(M3.ON_SURFACE_VARIANT, 8));
+        }
+
+        TextView name = ui.text(label, 12.5f, M3.ON_SURFACE, true);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        name.setMaxWidth(ui.dp(120));
+        LinearLayout.LayoutParams nlp = ui.wrap();
+        nlp.leftMargin = ui.dp(6);
+        head.addView(name, nlp);
+
+        if (!repModel.isEmpty()) {
+            TextView rm = modelChip(repModel);
+            LinearLayout.LayoutParams mlp = ui.wrap();
+            mlp.leftMargin = ui.dp(6);
+            head.addView(rm, mlp);
+        }
+        // 弹性空隙：把路由胶囊 / 状态徽章 / caret 推到右侧
+        head.addView(new View(host), new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        // 路由方式胶囊（额度优先 / 智能）：放在模型之后、状态徽章之前
+        JSONObject grpR = NativeData.obj(route, "group");
+        String routingR = grpR == null ? "" : NativeData.str(grpR, "routing", "");
+        String rlabel = routingLabel(routingR);
+        if ("额度优先".equals(rlabel) || "智能".equals(rlabel)) {
+            TextView rchip = badge(rlabel,
+                    ui.col(M3.SECONDARY_CONTAINER), ui.col(M3.ON_SECONDARY_CONTAINER));
+            LinearLayout.LayoutParams rlp = ui.wrap();
+            rlp.leftMargin = ui.dp(6);
+            head.addView(rchip, rlp);
+        }
+
+        TextView pb = providerBadge(items, tries);
+        if (pb != null) {
+            LinearLayout.LayoutParams bp = ui.wrap();
+            bp.leftMargin = ui.dp(6);
+            head.addView(pb, bp);
+        }
+
+        final TextView arr = ui.text(collapsed ? "\u25B8" : "\u25BE", 10,
+                M3.ON_SURFACE_VARIANT, false);
+        LinearLayout.LayoutParams al = ui.wrap();
+        al.leftMargin = ui.dp(6);
+        head.addView(arr, al);
+        wrap.addView(head, wrapLp());
+
+        // 账号容器：左侧竖向引导线 + 左缩进，做出「挂在供应商下面」的树形观感
+        final LinearLayout treeRow = ui.row();
+        LinearLayout.LayoutParams treeLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        treeLp.topMargin = ui.dp(6);
+        treeRow.setLayoutParams(treeLp);
+
+        View guide = new View(host);
+        GradientDrawable gd = new GradientDrawable();
+        gd.setColor(ui.col(M3.OUTLINE_VARIANT));
+        guide.setBackground(gd);
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
+                ui.dp(2), ViewGroup.LayoutParams.MATCH_PARENT);
+        treeRow.addView(guide, glp);
+
+        final LinearLayout acc = ui.column();
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        alp.leftMargin = ui.dp(14);
+        acc.setLayoutParams(alp);
+
+        java.util.LinkedHashMap<String, java.util.List<JSONObject>> byId =
+                new java.util.LinkedHashMap<>();
+        for (JSONObject x : items) {
+            String id = NativeData.str(x, "id", "");
+            if (id.isEmpty()) {
+                id = "?";
+            }
+            java.util.List<JSONObject> l = byId.get(id);
+            if (l == null) {
+                l = new java.util.ArrayList<>();
+                byId.put(id, l);
+            }
+            l.add(x);
+        }
+        for (java.util.Map.Entry<String, java.util.List<JSONObject>> e : byId.entrySet()) {
+            acc.addView(accountRow(route, e.getValue(), tries, answeredId));
+        }
+        treeRow.addView(acc, alp);
+        treeRow.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+        wrap.addView(treeRow, treeLp);
+
+        head.setOnClickListener(v -> {
+            boolean nowCollapsed = treeRow.getVisibility() == View.VISIBLE;
+            treeRow.setVisibility(nowCollapsed ? View.GONE : View.VISIBLE);
+            arr.setText(nowCollapsed ? "\u25B8" : "\u25BE");
+            if (nowCollapsed) {
+                provCollapsed.add(provKey);
+            } else {
+                provCollapsed.remove(provKey);
+            }
+        });
+        return wrap;
+    }
+
+    /** 供应商行徽章：只在该组「最后一条 try」失败或回答中时显示；成功不挂（避免每行都“已答”太吵）。 */
+    private TextView providerBadge(java.util.List<JSONObject> items, JSONArray tries) {
+        java.util.HashSet<String> ids = new java.util.HashSet<>();
+        for (JSONObject x : items) {
+            String id = NativeData.str(x, "id", "");
+            if (!id.isEmpty()) {
+                ids.add(id);
+            }
+        }
+        JSONObject t = lastTryOf(ids, tries);
+        if (t == null) {
+            return null;
+        }
+        if (!NativeData.flag(t, "done")) {
+            return badge("回答中…", ui.col(M3.PRIMARY), 0xFFFFFFFF);
+        }
+        int st = NativeData.num(t, "status");
+        if (st >= 400) {
+            return badge(st + " · 失败", ui.col(M3.ERROR), 0xFFFFFFFF);
+        }
+        return null;
+    }
+
+    private JSONObject lastTryOf(java.util.Set<String> ids, JSONArray tries) {
+        for (int i = tries.length() - 1; i >= 0; i--) {
+            JSONObject t = tries.optJSONObject(i);
+            if (t != null && ids.contains(NativeData.str(t, "id", ""))) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    /** 由一个 try 生成徽章：回答中(蓝) / 失败(红) / 已答(次要容器)。 */
+    private TextView tryBadge(JSONObject t) {
+        if (t == null) {
+            return null;
+        }
+        if (!NativeData.flag(t, "done")) {
+            return badge("回答中…", ui.col(M3.PRIMARY), 0xFFFFFFFF);
+        }
+        int st = NativeData.num(t, "status");
+        if (st >= 400) {
+            return badge(st + " · 失败", ui.col(M3.ERROR), 0xFFFFFFFF);
+        }
+        long ms = (long) NativeData.dec(t, "ms");
+        return badge(ms > 0 ? "已答 · " + NativeData.ms(ms) : "已答",
+                ui.col(M3.SECONDARY_CONTAINER), ui.col(M3.ON_SECONDARY_CONTAINER));
+    }
+
+    /** 模型名做成浅底圆角小胶囊（等宽小字），替代纯文字。 */
+    private TextView modelChip(String text) {
+        TextView t = ui.mono(text, 9.5f, M3.ON_SURFACE_VARIANT);
+        t.setBackground(ui.roundStroke(ui.col(M3.SURFACE_CONTAINER_HIGH), 999,
+                ui.col(M3.OUTLINE_VARIANT), 1f));
+        int px = ui.dp(7), py = ui.dp(2);
+        t.setPadding(px, py, px, py);
+        t.setSingleLine(true);
+        t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        t.setMaxWidth(ui.dp(160));
+        return t;
+    }
+
+    private TextView badge(String text, int bgColor, int fgColor) {
+        TextView t = ui.textColor(text, 9.5f, fgColor, true);
+        t.setBackground(ui.round(bgColor, 999));
+        int px = ui.dp(7), py = ui.dp(2);
+        t.setPadding(px, py, px, py);
+        t.setSingleLine(true);
+        return t;
+    }
+
+    /** 一个账号一行（同 id 的多条 order 合并）。 */
+    private View accountRow(JSONObject route, java.util.List<JSONObject> same, JSONArray tries,
+                            String answeredId) {
+        JSONObject w = same.get(0);
+        String id = NativeData.str(w, "id", "");
+        boolean picked = id != null && !id.isEmpty() && id.equals(answeredId);
+
+        final LinearLayout card = ui.column();
+        GradientDrawable bg = ui.roundStroke(
+                ui.col(picked ? M3.SURFACE : M3.SURFACE_CONTAINER_LOW), 12,
+                ui.col(picked ? M3.ON_SURFACE : M3.OUTLINE_VARIANT), picked ? 2f : 1f);
+        card.setBackground(bg);
+        card.setPadding(ui.dp(11), ui.dp(8), ui.dp(11), ui.dp(8));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = ui.dp(6);
+        card.setLayoutParams(lp);
+
+        LinearLayout row = ui.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        View circle = new View(host);
+        GradientDrawable cd = new GradientDrawable();
+        cd.setShape(GradientDrawable.OVAL);
+        cd.setColor(ui.col(picked ? M3.ON_SURFACE : M3.SURFACE_CONTAINER_HIGHEST));
+        circle.setBackground(cd);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ui.dp(8), ui.dp(8));
+        clp.gravity = Gravity.CENTER_VERTICAL;
+        row.addView(circle, clp);
+
+        int icon = ProviderIcons.of(host, NativeData.str(w, "icon", ""),
+                NativeData.str(w, "provider", ""), NativeData.str(w, "preset", ""));
+        if (icon != 0) {
+            android.widget.ImageView iv = new android.widget.ImageView(host);
+            iv.setImageResource(icon);
+            iv.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(ui.dp(15), ui.dp(15));
+            ilp.leftMargin = ui.dp(5);
+            row.addView(iv, ilp);
+        }
+
+        String who = NativeData.str(w, "who", NativeData.str(w, "name", "?"));
+        TextView name = ui.text(who, 12, M3.ON_SURFACE, true);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        name.setMaxWidth(ui.dp(120));
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nlp.leftMargin = ui.dp(6);
+        row.addView(name, nlp);
+
+        String plan = Zh.of(NativeData.str(w, "plan", ""));
+        if (plan.isEmpty() && "account".equals(NativeData.str(w, "kind", ""))) {
+            plan = "Free";
+        }
+        if (!plan.isEmpty()) {
+            TextView p = ui.text(plan, 9, M3.ON_SURFACE_VARIANT, false);
+            LinearLayout.LayoutParams plp = ui.wrap();
+            plp.leftMargin = ui.dp(4);
+            row.addView(p, plp);
+        }
+
+        StringBuilder models = new StringBuilder();
+        for (JSONObject x : same) {
+            String mm = NativeData.str(x, "model", "");
+            if (mm.isEmpty()) {
+                continue;
+            }
+            if (models.length() > 0) {
+                models.append(" · ");
+            }
+            models.append(shortModel(mm));
+        }
+        if (models.length() > 0) {
+            TextView m = modelChip(models.toString());
+            LinearLayout.LayoutParams mlp = ui.wrap();
+            mlp.leftMargin = ui.dp(6);
+            row.addView(m, mlp);
+        }
+        // 弹性空隙：状态徽章推到右侧
+        row.addView(new View(host), new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        java.util.Set<String> one = new java.util.HashSet<>();
+        one.add(id);
+        TextView stateBadge = tryBadge(lastTryOf(one, tries));
+        if (stateBadge != null) {
+            LinearLayout.LayoutParams sbp = ui.wrap();
+            sbp.leftMargin = ui.dp(6);
+            row.addView(stateBadge, sbp);
+        }
+        card.addView(row);
+
+        double used = NativeData.dec(w, "used");
+        TextView info = ui.text(quotaText(w), 10.5f,
+                used >= 90 ? M3.ERROR : M3.ON_SURFACE_VARIANT, false);
+        info.setLineSpacing(ui.dp(1), 1f);
+        info.setLayoutParams(ui.matchWrap(2));
+        card.addView(info);
+
+        final JSONObject mine = route;
+        ui.clickable(card, bg);
+        card.setOnClickListener(v -> {
+            if (mine != null) {
+                CtxSheet.show((android.app.Activity) host, ui, mine);
+            }
+        });
+        return card;
+    }
+
+    private String quotaText(JSONObject w) {
+        double used = NativeData.dec(w, "used");
+        double amount = NativeData.dec(w, "amount");
+        double limit = NativeData.dec(w, "limit");
+        String unit = Zh.of(NativeData.str(w, "unit", ""));
+        StringBuilder sb = new StringBuilder();
+        if (limit > 0) {
+            sb.append(brief(amount)).append(" / ").append(brief(limit));
+            if (!unit.isEmpty()) {
+                sb.append(' ').append(unit);
+            }
+            // 像图2：额度之后、重置之前补一句「已用 X%」（used 取不到就省略）
+            if (used > 0) {
+                sb.append(" · 已用 ").append(NativeData.percent(used));
+            }
+        } else {
+            sb.append("已用 ").append(NativeData.percent(used));
+        }
+        JSONArray renews = NativeData.arr(w, "renews");
+        if (renews.length() > 0) {
+            String u = NativeData.until(renews.optString(0, ""));
+            if (!u.isEmpty()) {
+                sb.append(" · ").append(u).append("重置");
+            }
+        }
+        JSONObject rest = NativeData.obj(w, "rest");
+        if (rest != null) {
+            String u = NativeData.until(NativeData.str(rest, "until", ""));
+            sb.append(" · 暂停使用");
+            if (!u.isEmpty()) {
+                sb.append(' ').append(u).append("恢复");
+            }
+        }
+        if (NativeData.flag(w, "fallback")) {
+            sb.append(" · 备用");
+        }
+        return sb.toString();
+    }
+
+    private JSONObject findOrderItem(JSONArray order, String id) {
+        if (id == null || id.isEmpty()) {
+            return null;
+        }
+        for (int i = 0; i < order.length(); i++) {
+            JSONObject w = order.optJSONObject(i);
+            if (w != null && id.equals(NativeData.str(w, "id", ""))) {
+                return w;
+            }
+        }
+        return null;
+    }
+
+    /** 底部一句决策解释（近似图2）：按「回答的那条 try」→ order 项取供应商友好名+模型。 */
+    private View bottomExplain(JSONObject route) {
+        JSONArray tries = NativeData.arr(route, "tries");
+        JSONObject t = lastSuccessOrLast(tries);
+        String text;
+        if (tries.length() == 0 || t == null) {
+            text = "暂无决策信息。";
+        } else {
+            String id = NativeData.str(t, "id", "");
+            JSONObject ow = findOrderItem(NativeData.arr(route, "order"), id);
+            String model = shortModel(ow != null
+                    ? NativeData.str(ow, "model", "") : NativeData.str(route, "model", ""));
+            String prov = ow == null ? "" : providerDisplay(
+                    NativeData.str(ow, "provider", ""), ow);
+            String tag;
+            if (!prov.isEmpty() && !model.isEmpty()) {
+                tag = prov + "(" + model + ")";
+            } else if (!prov.isEmpty()) {
+                tag = prov;
+            } else if (!model.isEmpty()) {
+                tag = model;
+            } else {
+                tag = "magpie";
+            }
+
+            if (!NativeData.flag(t, "done")) {
+                text = "正在由 " + tag + " 回答…";
+            } else {
+                int st = NativeData.num(t, "status");
+                if (st >= 400) {
+                    text = tag + " 返回 " + st + " · 失败，且无其他可问；"
+                            + "这可能是暂时性错误，稍后会自动重试。";
+                } else {
+                    long ms = (long) NativeData.dec(t, "ms");
+                    text = "由 " + tag + " 回答" + (ms > 0 ? " · " + NativeData.ms(ms) : "") + "。";
+                }
+            }
+        }
+        TextView v = ui.text(text, 11, M3.ON_SURFACE_VARIANT, false);
+        v.setLineSpacing(ui.dp(2), 1f);
+        v.setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(6));
+        return v;
+    }
+
+    /** tries 里最后一条「成功」的；没有成功就退回最后一条（可能失败/进行中）。 */
+    private JSONObject lastSuccessOrLast(JSONArray tries) {
+        JSONObject last = null;
+        for (int i = 0; i < tries.length(); i++) {
+            JSONObject x = tries.optJSONObject(i);
+            if (x != null) {
+                last = x;
+            }
+        }
+        for (int i = tries.length() - 1; i >= 0; i--) {
+            JSONObject x = tries.optJSONObject(i);
+            if (x != null && NativeData.flag(x, "done")
+                    && NativeData.num(x, "status") < 400) {
+                return x;
+            }
+        }
+        return last;
     }
 
     /** 左侧：所有并发 agent 的小卡竖排；中间箭头；右侧：一个 magpie 卡。 */
@@ -362,10 +1077,40 @@ final class LivePanel {
     private void renderEmpty() {
         body.removeAllViews();
         body.addView(nodes(null, null, null));
+        // 提示语只在空态显示；有数据后不再出现
+        TextView hint = ui.text("等待请求；经 agent 发出请求后，这里实时播放："
+                        + "路由把谁排第一及原因、每次尝试和各自的回应。",
+                11, M3.ON_SURFACE_VARIANT, false);
+        hint.setLineSpacing(ui.dp(2), 1f);
+        hint.setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0);
+        body.addView(hint);
         TextView t = ui.text("还没有请求", 12, M3.ON_SURFACE_VARIANT, false);
         t.setGravity(Gravity.CENTER);
         t.setPadding(0, ui.dp(16), 0, ui.dp(10));
         body.addView(t);
+        body.addView(bottomCounters());
+    }
+
+    /** 底部计数一行：请求 / 改道 / 错误（大号 tnum 数字 + 小标签，错误用红色）。 */
+    private View bottomCounters() {
+        LinearLayout row = ui.row();
+        row.setPadding(ui.dp(20), ui.dp(12), ui.dp(20), ui.dp(8));
+        int req = lastTotals == null ? 0 : NativeData.num(lastTotals, "requests");
+        int rer = lastTotals == null ? 0 : NativeData.num(lastTotals, "rerouted");
+        int err = lastTotals == null ? 0 : NativeData.num(lastTotals, "errors");
+        row.addView(counterCell2("请求", req, M3.ON_SURFACE), ui.weight(1));
+        row.addView(counterCell2("改道", rer, M3.ON_SURFACE), ui.weight(1));
+        row.addView(counterCell2("错误", err, M3.ERROR), ui.weight(1));
+        return row;
+    }
+
+    private LinearLayout counterCell2(String label, int value, int valueRole) {
+        LinearLayout box = ui.column();
+        TextView v = ui.text(String.valueOf(value), 22, valueRole, true);
+        v.setFontFeatureSettings("tnum");
+        box.addView(v);
+        box.addView(ui.text(label, 11, M3.ON_SURFACE_VARIANT, false));
+        return box;
     }
 
     private View nodes(String agent, String model, JSONObject group) {

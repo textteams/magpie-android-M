@@ -40,6 +40,8 @@ public class UpdateActivity extends Activity {
     private Button updateNow;
     private Button openPage;
     private Button rollback;
+    private Button changeSource;
+    private Button testSource;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean busy;
@@ -77,6 +79,8 @@ public class UpdateActivity extends Activity {
         updateNow = findViewById(R.id.update_now);
         openPage = findViewById(R.id.open_page);
         rollback = findViewById(R.id.rollback);
+        changeSource = findViewById(R.id.change_source);
+        testSource = findViewById(R.id.test_source);
 
         check.setOnClickListener(v -> checkForUpdates(true));
         updateNow.setOnClickListener(v -> installNow());
@@ -93,6 +97,12 @@ public class UpdateActivity extends Activity {
             }
         });
         rollback.setOnClickListener(v -> confirmRollback());
+        changeSource.setOnClickListener(v -> UpdateMirror.showPicker(this,
+                () -> checkForUpdates(true)));
+        testSource.setOnClickListener(v -> {
+            status.setText(R.string.update_testing);
+            UpdateMirror.testCurrentAsync(this, this::showTestResult);
+        });
 
         applyTheme();
         showLocalVersion();
@@ -129,6 +139,8 @@ public class UpdateActivity extends Activity {
         filled(updateNow, c);
         outlined(openPage, c);
         outlined(rollback, c);
+        outlined(changeSource, c);
+        outlined(testSource, c);
 
         progress.setProgressTintList(ColorStateList.valueOf(c[M3.PRIMARY]));
         progress.setProgressBackgroundTintList(
@@ -155,6 +167,20 @@ public class UpdateActivity extends Activity {
         b.setTextColor(c[M3.PRIMARY]);
         b.setAllCaps(false);
         b.setStateListAnimator(null);
+    }
+
+    /** 「下载并安装」启用态 + alpha 一起改：只 setEnabled 不改 alpha 会一直半灰。 */
+    private void setUpdateEnabled(boolean on) {
+        updateNow.setEnabled(on);
+        updateNow.setAlpha(on ? 1f : 0.45f);
+    }
+
+    private void showTestResult(String result) {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.update_test_result)
+                .setMessage(result)
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
     }
 
     private int dp(int v) {
@@ -199,7 +225,7 @@ public class UpdateActivity extends Activity {
         }
         busy = true;
         status.setText(R.string.update_checking);
-        updateNow.setEnabled(false);
+        setUpdateEnabled(false);
         ui.post(tick);
         new Thread(() -> {
             try {
@@ -215,10 +241,15 @@ public class UpdateActivity extends Activity {
                     busy = false;
                     showRelease(rel);
                     curVersion.setText(localFinal.length() > 0 ? localFinal : "?");
-                    updateNow.setEnabled(newer && rel.hasAsset());
-                    status.setText(newer
-                            ? getString(R.string.update_available)
-                            : getString(R.string.update_up_to_date));
+                    setUpdateEnabled(rel.hasAsset());
+                    boolean localNewer = Updater.newer(localFinal, rel.version);
+                    if (newer) {
+                        status.setText(R.string.update_available);
+                    } else if (localNewer) {
+                        status.setText(getString(R.string.update_local_newer, rel.version));
+                    } else {
+                        status.setText(R.string.update_up_to_date);
+                    }
                     if (!rel.hasAsset() && newer) {
                         status.setText("这一版没有 " + Updater.assetName());
                     }
@@ -228,7 +259,7 @@ public class UpdateActivity extends Activity {
                 final String why = e.getMessage();
                 ui.post(() -> {
                     busy = false;
-                    status.setText("检查失败：" + why);
+                    status.setText("检查失败：" + why + "\n可点「更换更新源」换镜像后重试。");
                     paint();
                     if (loud) {
                         Toast.makeText(this, why, Toast.LENGTH_LONG).show();
@@ -259,8 +290,9 @@ public class UpdateActivity extends Activity {
         }
         busy = true;
         Updater.markRunning("准备下载…");
-        updateNow.setEnabled(false);
+        setUpdateEnabled(false);
         check.setEnabled(false);
+        check.setAlpha(0.45f);
         progress.setVisibility(View.VISIBLE);
         progress.setProgress(0);
         ui.post(tick);
@@ -289,6 +321,7 @@ public class UpdateActivity extends Activity {
             ui.post(() -> {
                 busy = false;
                 check.setEnabled(true);
+                check.setAlpha(1f);
                 if (ok != null) {
                     Updater.markDone();
                     curVersion.setText(ok);
@@ -304,7 +337,7 @@ public class UpdateActivity extends Activity {
                     Updater.markFailed(bad);
                     status.setText("更新失败：" + bad);
                     progress.setVisibility(View.GONE);
-                    updateNow.setEnabled(true);
+                    setUpdateEnabled(true);
                 }
                 paint();
             });
@@ -363,10 +396,14 @@ public class UpdateActivity extends Activity {
             } else {
                 status.setText(s);
             }
-            updateNow.setEnabled(false);
+            setUpdateEnabled(false);
             check.setEnabled(false);
+            check.setAlpha(0.45f);
             return;
         }
+        // 非运行态：确保「检查更新」是可用的实色按钮（曾因 setEnabled(false) 后未复位而变灰）
+        check.setEnabled(true);
+        check.setAlpha(1f);
         String err = Updater.error();
         if (err != null && err.length() > 0) {
             progress.setVisibility(View.GONE);

@@ -95,74 +95,8 @@ public class UpdateSettingsActivity extends Activity {
     }
 
     private void showMirrorDialog(TextView mirrorValue) {
-        List<String> prefixes = new ArrayList<>();
-        List<String> names = new ArrayList<>();
-        for (int i = 0; i < ShellUpdater.MIRROR_PREFIXES.length; i++) {
-            prefixes.add(ShellUpdater.MIRROR_PREFIXES[i]);
-            names.add(ShellUpdater.MIRROR_NAMES[i]);
-        }
-        for (String p : Prefs.shellCustomMirrors(this)) {
-            prefixes.add(p);
-            names.add(p);
-        }
-        final String[] items = names.toArray(new String[0]);
-        // 卡片式底部弹层（统一弹窗样式）
-        android.app.Dialog dlg = new android.app.Dialog(this, R.style.Theme_Magpie_Sheet);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(c[M3.SURFACE_CONTAINER_LOW]);
-        int stroke = (c[M3.PRIMARY] & 0x00FFFFFF) | 0x52000000;
-        bg.setStroke(dp(2), stroke);
-        float r = dp(28);
-        bg.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
-        root.setBackground(bg);
-        int pad = dp(16);
-        root.setPadding(pad, dp(14), pad,
-                dp(16) + MainActivity.barHeightOf(this, "navigation_bar_height"));
-
-        TextView title = new TextView(this);
-        title.setText(R.string.shell_mirror_dialog_title);
-        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 21);
-        title.setTextColor(c[M3.ON_SURFACE]);
-        root.addView(title);
-
-        android.widget.ScrollView sc = new android.widget.ScrollView(this);
-        LinearLayout list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        for (int i = 0; i < items.length; i++) {
-            final int idx = i;
-            TextView row = new TextView(this);
-            row.setText(items[i]);
-            row.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
-            row.setTextColor(c[M3.ON_SURFACE]);
-            row.setPadding(dp(12), dp(13), dp(12), dp(13));
-            GradientDrawable rbg = new GradientDrawable();
-            rbg.setColor(c[M3.SURFACE_CONTAINER_LOW]);
-            rbg.setCornerRadius(dp(14));
-            rbg.setStroke(dp(1), c[M3.OUTLINE_VARIANT]);
-            row.setBackground(rbg);
-            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            rlp.setMargins(0, 0, 0, dp(6));
-            row.setOnClickListener(v -> {
-                dlg.dismiss();
-                Prefs.setShellMirror(this, prefixes.get(idx));
-                refreshMirrorLabel(mirrorValue);
-            });
-            list.addView(row, rlp);
-        }
-        sc.addView(list);
-        root.addView(sc, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(320)));
-
-        dlg.setContentView(root);
-        android.view.Window w = dlg.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawableResource(android.R.color.transparent);
-            w.setGravity(android.view.Gravity.BOTTOM);
-        }
-        dlg.show();
+        // 复用统一的选择器（含每行「测」测试）；选中即写 Prefs 并回填标签
+        UpdateMirror.showPicker(this, () -> refreshMirrorLabel(mirrorValue));
     }
 
     private void showAddMirrorDialog(TextView mirrorValue) {

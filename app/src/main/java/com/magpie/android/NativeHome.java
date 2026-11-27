@@ -852,8 +852,9 @@ public class NativeHome extends Activity {
         final String[] groups = {"控制台", "网关", "插件", "更新", "其他"};
         final String[][] titles = {
                 {"赞赏作者", "打开控制后台", "界面主题", "错误诊断", "AI 排查端口"},
-                {"重启网关", "悬浮球保活", "查看日志", "复制网关地址", "忽略电池优化"},
-                {"导入本地插件", "粘贴 Marvis 登录回调", "文件管理器", "省电策略实验室", "缓存清理"},
+                {"重启网关", "悬浮球保活", "查看日志", "复制网关地址", "省电策略实验室",
+                        "安装 Antigravity CLI"},
+                {"导入本地插件", "粘贴 Marvis 登录回调", "文件管理器", "缓存清理"},
                 {"检查 magpie 更新", "检查 App 更新", "更新设置"},
                 {"复制网页登录链接", "用浏览器打开", "设置", "关于"},
         };
@@ -866,11 +867,11 @@ public class NativeHome extends Activity {
                 {"先停再起，改过密钥或配置后用得上",
                         "设了无限制仍被系统掐断？加个悬浮球通常就不断了（图标/大小可调）",
                         "网关最后写下的三百行输出", "把 …:3425/v1 复制到剪贴板",
-                        "让系统不要在熄屏后冻结网关"},
+                        "诊断后台被冻结的原因，可一键设无限制（需 root）",
+                        "给 Antigravity 供应商装 CLI（下载约65MB，解压200MB）；装好后去供应商页点重试登录"},
                 {"从手机存储选文件夹，拷进沙箱并交给 magpie",
                         "浏览器里登录完，把地址栏整条 URL 贴进来",
                         "浏览、导入、删除、复制 magpie HOME 目录里的文件",
-                        "诊断后台被冻结的原因，可一键设无限制（需 root）",
                         "删旧版 Bun、更新包残留、可重建的索引，实测能腾出几百 MB"},
                 {"拉 GitHub 上的新版二进制，不用重装 APK", "下载新版 APK 并调系统安装器",
                         "内核与壳软件各自的稳定/测试渠道和更新源"},
@@ -880,20 +881,21 @@ public class NativeHome extends Activity {
                         "官方仓库、移植作者与许可证"},
         };
         final int[][] icons = {
-                // 控制台：赞赏 / 控制后台 / 错误诊断 / AI排查端口
+                // 控制台：赞赏 / 控制后台 / 界面主题 / 错误诊断 / AI 排查端口
                 {R.drawable.ic_hand_heart, R.drawable.ic_monitor_cog,
                         R.drawable.ic_layout_dashboard, R.drawable.ic_stethoscope,
                         R.drawable.ic_bot},
-                // 网关：重启 / 悬浮球 / 日志 / 复制地址 / 电池优化
+                // 网关：重启 / 悬浮球 / 日志 / 复制地址 / 省电实验室 / 安装 Antigravity CLI
                 {R.drawable.ic_rotate_cw, R.drawable.ic_aperture,
-                        R.drawable.ic_file_text, R.drawable.ic_copy, R.drawable.ic_zap},
-                // 插件：导入 / 粘贴回调 / 文件管理器 / 省电实验室 / 缓存清理
+                        R.drawable.ic_file_text, R.drawable.ic_copy, R.drawable.ic_flask_conical,
+                        R.drawable.ic_download},
+                // 插件：导入 / 粘贴回调 / 文件管理器 / 缓存清理
                 {R.drawable.ic_folder, R.drawable.ic_link, R.drawable.ic_folder_open,
-                        R.drawable.ic_flask_conical, R.drawable.ic_trash_2},
+                        R.drawable.ic_trash_2},
                 // 更新：检查内核 / 检查App / 更新设置
                 {R.drawable.ic_download, R.drawable.ic_arrow_down_to_line,
                         R.drawable.ic_settings_2},
-                // 其他：网页登录链接 / 浏览器 / 设置 / 关于
+                // 其他：复制登录链接 / 浏览器 / 设置 / 关于
                 {R.drawable.ic_link, R.drawable.ic_external_link,
                         R.drawable.ic_settings, R.drawable.ic_info},
         };
@@ -1014,20 +1016,26 @@ public class NativeHome extends Activity {
     /** 菜单动作表：和 {@link #showMenu()} 里的 titles 一一对应。 */
     private void runMenuAction(int group, int index, String title) {
         switch (group) {
-            case 0: // 控制台
-                if (index == 0) {
-                    showDonate();
-                } else if (index == 1) {
-                    openWebUi();
-                } else if (index == 2) {
-                    ThemeSheet.show(this, ui);
-                } else if (index == 3) {
-                    confirmAndDiagnose();
-                } else {
-                    showDiagPort();
+            case 0: // 控制台：赞赏 / 控制后台 / 界面主题 / 错误诊断 / AI 排查端口
+                switch (index) {
+                    case 0:
+                        showDonate();
+                        break;
+                    case 1:
+                        openWebUi();
+                        break;
+                    case 2:
+                        ThemeSheet.show(this, ui);
+                        break;
+                    case 3:
+                        confirmAndDiagnose();
+                        break;
+                    default:
+                        showDiagPort();
+                        break;
                 }
                 break;
-            case 1: // 网关
+            case 1: // 网关：重启 / 悬浮球 / 日志 / 复制地址 / 省电实验室
                 switch (index) {
                     case 0:
                         GatewayService.restart(this);
@@ -1044,34 +1052,47 @@ public class NativeHome extends Activity {
                     case 3:
                         copyGateway();
                         break;
+                    case 4:
+                        PowerLab.show(this, ui);
+                        break;
+                    case 5:
+                        installAntigravityCli();
+                        break;
                     default:
-                        ignoreBattery();
+                        PowerLab.show(this, ui);
                         break;
                 }
                 break;
-            case 2: // 插件
-                if (index == 0) {
-                    PluginTools.pickFolder(this);
-                } else if (index == 1) {
-                    PluginTools.promptMarvisCallback(this, ui, this::styleDialog);
-                } else if (index == 2) {
-                    FileManager.open(this, ui, FileManager.root(this));
-                } else if (index == 3) {
-                    PowerLab.show(this, ui);
-                } else {
-                    CacheCleaner.show(this, ui);
+            case 2: // 插件：导入 / 粘贴回调 / 文件管理器 / 缓存清理
+                switch (index) {
+                    case 0:
+                        PluginTools.pickFolder(this);
+                        break;
+                    case 1:
+                        PluginTools.promptMarvisCallback(this, ui, this::styleDialog);
+                        break;
+                    case 2:
+                        FileManager.open(this, ui, FileManager.root(this));
+                        break;
+                    default:
+                        CacheCleaner.show(this, ui);
+                        break;
                 }
                 break;
-            case 3: // 更新
-                if (index == 0) {
-                    startActivity(new Intent(this, UpdateActivity.class));
-                } else if (index == 1) {
-                    ShellUpdateFlow.checkNow(this, this::styleDialog);
-                } else {
-                    startActivity(new Intent(this, UpdateSettingsActivity.class));
+            case 3: // 更新：检查内核 / 检查App / 更新设置
+                switch (index) {
+                    case 0:
+                        startActivity(new Intent(this, UpdateActivity.class));
+                        break;
+                    case 1:
+                        ShellUpdateFlow.checkNow(this, this::styleDialog);
+                        break;
+                    default:
+                        startActivity(new Intent(this, UpdateSettingsActivity.class));
+                        break;
                 }
                 break;
-            default: // 其他
+            default: // 其他：复制登录链接 / 浏览器 / 设置 / 关于
                 switch (index) {
                     case 0:
                         copyWebLoginLink();
@@ -1088,6 +1109,54 @@ public class NativeHome extends Activity {
                 }
                 break;
         }
+    }
+
+    /** 菜单「安装 Antigravity CLI」：先确认（说明体积），再后台下载安装。 */
+    private void installAntigravityCli() {
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("安装 Antigravity CLI")
+                .setMessage("给 Antigravity 供应商装 CLI。将从官方源下载 android arm64 包：\n"
+                        + "下载约 65MB，解压后约 200MB。\n"
+                        + "装好后去供应商页点“重试”即可登录。\n\n现在开始？")
+                .setPositiveButton("开始安装", (d, w) -> runAntigravityInstall())
+                .setNegativeButton(android.R.string.cancel, null)
+                .create();
+        styleDialog(dlg);
+        dlg.show();
+    }
+
+    private void runAntigravityInstall() {
+        final AlertDialog busy = new AlertDialog.Builder(this)
+                .setTitle("安装 Antigravity CLI")
+                .setMessage("正在下载安装…（约 65MB，请保持前台）")
+                .setCancelable(false)
+                .create();
+        styleDialog(busy);
+        busy.show();
+        AntigravityCli.install(this, new AntigravityCli.Progress() {
+            @Override
+            public void onProgress(int percent) {
+                if (percent >= 0 && busy.isShowing()) {
+                    busy.setMessage("正在下载… " + percent + "%（约 65MB）");
+                }
+            }
+
+            @Override
+            public void onDone(String version, String path, long size) {
+                if (busy.isShowing()) {
+                    busy.dismiss();
+                }
+                toast("已安装 Antigravity CLI " + version + "，去供应商页点“重试”登录");
+            }
+
+            @Override
+            public void onError(String reason) {
+                if (busy.isShowing()) {
+                    busy.dismiss();
+                }
+                toast("安装失败：" + reason);
+            }
+        });
     }
 
     /**
@@ -1110,6 +1179,20 @@ public class NativeHome extends Activity {
         toast(Prefs.lan(this)
                 ? "已复制本机登录链接，粘到浏览器即可"
                 : "已复制登录链接，粘到浏览器即可（带 key，不用再输）");
+    }
+
+    /** 复制「控制后台最后停留那页」的完整地址（含 k=）；没记录就提示先去逛一圈。 */
+    private void copyLastWebUrl() {
+        String url = Prefs.lastWebUrl(this);
+        if (url == null || url.isEmpty()) {
+            toast("还没有记录，先去控制后台逛一圈");
+            return;
+        }
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (cm != null) {
+            cm.setPrimaryClip(ClipData.newPlainText("magpie", url));
+        }
+        toast("已复制上次网页地址");
     }
 
     /** 用系统浏览器打开 magpie 网页（带 key，直接登进去）。 */

@@ -117,6 +117,17 @@ public class GatewayService extends Service {
         return new File(rootDir(ctx), "magpie");
     }
 
+    /**
+     * 已经装了可用内核？（ELF 存在且是合法 ELF）
+     *
+     * <p>壳更新用它决定下载哪种包：老用户（有内核）默认下「壳子包」-shell.apk（792K，
+     * 不带内核，不重复下 99M）；全新/清空（没内核）才下完整包。
+     */
+    static boolean kernelInstalled(Context ctx) {
+        File bin = binary(ctx);
+        return bin.exists() && bin.length() >= 4 && looksLikeElf(bin);
+    }
+
     static File dataDir(Context ctx) {
         return new File(rootDir(ctx), "data");
     }

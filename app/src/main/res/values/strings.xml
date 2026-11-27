@@ -162,4 +162,11 @@
     <string name="shell_lanzou_url">https://wwbcx.lanzout.com/b0rbkmqxa</string>
     <string name="shell_lanzou_password">9vgx</string>
     <string name="lanzou_pwd_copied">密码 %1$s 已复制，正在打开蓝奏云</string>
+    <string name="update_local_newer">当前版本比更新源更新（源上最新 %1$s），可手动安装源上的版本</string>
+    <string name="update_change_source">更换更新源</string>
+    <string name="update_test_source">测试当前更新源</string>
+    <string name="update_test_result">更新源测试</string>
+    <string name="update_testing">测试中…</string>
+    <string name="update_mirror_switched">已切换：%1$s</string>
+    <string name="update_mirror_test">测</string>
 </resources>
